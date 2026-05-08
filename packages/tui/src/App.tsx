@@ -8,6 +8,7 @@ import { formatBytes } from "./lib/files.ts";
 import { createClient, runTurn } from "./lib/agent.ts";
 import type { AgentSubscriber } from "./lib/agent.ts";
 import type { ProgressEvent } from "./types.ts";
+import { Mascot } from "./Mascot.tsx";
 
 interface UserItem {
   kind: "user";
@@ -261,10 +262,13 @@ function Chat({ cwd }: { cwd: string }): JSX.Element {
 function Header(): JSX.Element {
   return (
     <Box flexDirection="column">
-      <Text color={theme.pink} bold>
-        video-strip-club · agent
-      </Text>
-      <Text color={theme.muted}>chat to encode · powered by Claude + ffmpeg</Text>
+      <Mascot />
+      <Box marginTop={1} flexDirection="column" alignItems="center">
+        <Text color={theme.pink} bold>
+          video-strip-club · agent
+        </Text>
+        <Text color={theme.muted}>chat to encode · powered by Claude + ffmpeg</Text>
+      </Box>
     </Box>
   );
 }
