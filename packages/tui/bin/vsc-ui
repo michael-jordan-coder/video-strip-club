@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+PKG_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+
+find_tsx() {
+  local dir="$PKG_ROOT"
+  while [ "$dir" != "/" ]; do
+    if [ -x "$dir/node_modules/.bin/tsx" ]; then
+      printf '%s\n' "$dir/node_modules/.bin/tsx"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+if ! TSX="$(find_tsx)"; then
+  echo "vsc-ui: tsx not found — run 'npm install' in the monorepo root" >&2
+  exit 1
+fi
+exec "$TSX" "$PKG_ROOT/src/cli.tsx" "$@"

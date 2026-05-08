@@ -1,0 +1,31 @@
+{
+  "name": "@vsc/tui",
+  "version": "0.1.0",
+  "description": "video-strip-club Ink TUI — interactive Charm-flavored frontend for the vsc CLI.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "vsc-ui": "./bin/vsc-ui"
+  },
+  "scripts": {
+    "vsc-ui": "tsx src/cli.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "boxen": "^8.0.1",
+    "chalk": "^5.4.1",
+    "figures": "^6.1.0",
+    "ink": "^5.0.1",
+    "ink-spinner": "^5.0.0",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

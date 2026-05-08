@@ -4,7 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repo shape
 
-This is an npm-workspaces monorepo (`workspaces: ["packages/*"]`). Today there is one package: `@vsc/cli` at `packages/cli/`. Run `npm install` from the repo root to bootstrap; npm hoists shared deps and symlinks `node_modules/.bin/vsc` to `packages/cli/bin/vsc`.
+This is an npm-workspaces monorepo (`workspaces: ["packages/*"]`). Packages today:
+
+- `@vsc/cli` at `packages/cli/` — the encoding engine (commander CLI, NDJSON event stream, ffmpeg/HandBrake/gifski wrappers).
+- `@vsc/tui` at `packages/tui/` — Ink-based terminal UI that drives `@vsc/cli` via subprocess and consumes its NDJSON event stream as React state.
+
+Run `npm install` from the repo root to bootstrap; npm hoists shared deps and symlinks both bins (`node_modules/.bin/vsc`, `node_modules/.bin/vsc-ui`).
+
+The TUI duplicates a small subset of `@vsc/cli`'s wire types (`PresetId`, `ProgressEvent`, etc.) at `packages/tui/src/types.ts`. When a third consumer (e.g. a web frontend) appears, extract those types into a shared `@vsc/core` package — the TUI's `types.ts` has a comment marking the boundary.
 
 ## Commands
 

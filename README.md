@@ -15,6 +15,8 @@ npm install
 ./node_modules/.bin/vsc presets              # list available presets
 ./node_modules/.bin/vsc analyze video.mp4    # codec, resolution, duration, bitrate
 ./node_modules/.bin/vsc compress video.mp4 --preset web-hero-loop
+
+./node_modules/.bin/vsc-ui                   # Ink TUI: pick file → preset → live encode
 ```
 
 Every successful run also writes a self-contained `<basename>.html` preview page next to the artifacts — `open` it to see the encoded video, file sizes, and a copy-paste `<video>` snippet.
