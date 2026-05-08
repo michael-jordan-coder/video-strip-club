@@ -1,3 +1,4 @@
+import { unlinkSync } from "node:fs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
@@ -88,10 +89,33 @@ function Chat({ cwd }: { cwd: string }): JSX.Element {
   );
   const abortRef = useRef<AbortController | null>(null);
   const itemIdRef = useRef(0);
+  const outputsRef = useRef<Set<string>>(new Set());
 
   const nextId = useCallback(() => {
     itemIdRef.current += 1;
     return `i${itemIdRef.current}`;
+  }, []);
+
+  // Outputs are intentionally ephemeral — sweep them on any path that ends
+  // the session. process.on('exit') covers /quit, ctrl+c (Ink translates
+  // SIGINT into a graceful exit when exitOnCtrlC is set), and the natural
+  // event-loop drain. Unhandled SIGKILL still leaks files, which is
+  // acceptable for a temp file in cwd.
+  useEffect(() => {
+    const sweep = () => {
+      for (const path of outputsRef.current) {
+        try {
+          unlinkSync(path);
+        } catch {
+          // File may have been moved/deleted by the user already — fine.
+        }
+      }
+      outputsRef.current.clear();
+    };
+    process.on("exit", sweep);
+    return () => {
+      process.off("exit", sweep);
+    };
   }, []);
 
   useInput((inputChar, key) => {
@@ -148,6 +172,9 @@ function Chat({ cwd }: { cwd: string }): JSX.Element {
             return next;
           }),
         );
+      },
+      onOutputCreated(path) {
+        outputsRef.current.add(path);
       },
     }),
     [],

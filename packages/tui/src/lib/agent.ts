@@ -11,12 +11,17 @@ import type { CompressedArtifact, PresetId, ProgressEvent } from "../types.ts";
  * Ink layer renders live, even while the agent loop is awaiting a long
  * encode. Returned IDs are TUI-scoped, not Anthropic tool_use IDs — the
  * Tool Runner doesn't expose those to `run`.
+ *
+ * `onOutputCreated` lets the App track encoded files so it can sweep them
+ * on session exit — outputs are intentionally ephemeral; users copy/rename
+ * to keep them.
  */
 export interface AgentSubscriber {
   onAssistantText(delta: string): void;
   onToolStart(id: string, name: string, input: unknown): void;
   onToolProgress(id: string, event: ProgressEvent): void;
   onToolEnd(id: string, summary: string, isError: boolean): void;
+  onOutputCreated(path: string): void;
 }
 
 export interface AgentTurnResult {
@@ -34,7 +39,9 @@ You have four tools:
 - list_videos — find video files (.mp4, .mov, .mkv, .webm, .m4v, .avi). Always start here when the user references "this video" / "the video" / "my video" without naming a file.
 - analyze_video — probe a specific file. Returns duration, resolution, size, audio presence. Run before recommending a preset.
 - list_presets — get the four web delivery presets and their summaries. Reference them only by id once you've seen this list.
-- compress_video — kick off the encode. Streams progress to the UI; returns the artifact list and HTML preview path on completion.
+- compress_video — encode the video to ONE optimized file written to the user's current directory. Streams progress to the UI and returns the output path on completion.
+
+The output is one optimized file (no fallback codec bundle, no poster, no HTML preview). It is saved directly in the user's current directory and is **deleted automatically when the session ends** — so when reporting completion, tell the user to copy or rename the file if they want to keep it.
 
 Decision rules for preset selection (apply in order):
 
@@ -199,7 +206,7 @@ export function createTools({ cwd, subscriberRef }: ToolFactoryArgs) {
   const compressTool = betaZodTool({
     name: "compress_video",
     description:
-      "Encode a video using a preset. Streams progress events live to the UI. Returns the artifact list and HTML preview path on completion. Output goes to ./out/<basename>/ next to the input by default.",
+      "Encode a video to ONE optimized file using a preset. The file is written into the user's current directory as <basename>.optimized.<ext> and will be deleted when this TUI session ends — tell the user to copy or rename it if they want to keep it. Streams progress events live to the UI.",
     inputSchema: z.object({
       path: z.string().describe("Absolute or cwd-relative path to the video file."),
       preset: presetSchema.describe("Preset id to use."),
@@ -212,17 +219,24 @@ export function createTools({ cwd, subscriberRef }: ToolFactoryArgs) {
         startEncode(
           input.path,
           input.preset as PresetId,
+          { outDir: cwd, single: true },
           (event) => {
             sub?.onToolProgress(id, event);
             if (event.type === "done") {
-              const summary = `done in ${Math.round(event.durationMs / 100) / 10}s · ${event.artifacts.length} artifact${event.artifacts.length === 1 ? "" : "s"}: ${event.artifacts.map(formatArtifact).join(", ")}${event.htmlPreviewPath ? ` · preview ${event.htmlPreviewPath}` : ""}`;
+              const primary = event.artifacts[0];
+              if (primary) sub?.onOutputCreated(primary.path);
+              const summary = primary
+                ? `done in ${Math.round(event.durationMs / 100) / 10}s · ${formatArtifact(primary)} → ${primary.path}`
+                : `done in ${Math.round(event.durationMs / 100) / 10}s`;
               sub?.onToolEnd(id, summary, false);
               resolve(
                 JSON.stringify({
-                  artifacts: event.artifacts,
+                  outputPath: primary?.path ?? null,
+                  sizeBytes: primary?.sizeBytes ?? null,
                   durationMs: event.durationMs,
-                  htmlPreviewPath: event.htmlPreviewPath,
                   oversizedCodecs: event.oversizedCodecs,
+                  ephemeralReminder:
+                    "This file will be deleted when the TUI session ends. The user should copy or rename it if they want to keep it.",
                 }),
               );
             } else if (event.type === "error") {

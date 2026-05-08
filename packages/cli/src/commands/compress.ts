@@ -45,6 +45,12 @@ export interface CompressOptions {
   force?: boolean | undefined;
   /** Inject a custom reporter (used by batch). Overrides jsonMode/progressFile. */
   reporter?: Reporter | undefined;
+  /**
+   * Produce only the primary output of the preset (the first video output, or
+   * the gif for gif-only presets), and skip posters + HTML preview. Output is
+   * named `<basename>.optimized.<ext>` to make intent obvious to consumers.
+   */
+  single?: boolean | undefined;
 }
 
 interface VideoPhase {
@@ -91,6 +97,7 @@ export async function compressCommand(
   const encoderChoice: Encoder = options.encoder ?? "ffmpeg";
   const force = options.force ?? false;
   const jsonMode = options.jsonMode ?? false;
+  const single = options.single ?? false;
 
   const reporter =
     options.reporter ??
@@ -98,7 +105,7 @@ export async function compressCommand(
       ? new JsonReporter(options.progressFile ? { tap: fileTap(options.progressFile) } : {})
       : new PrettyReporter(options.progressFile ? { tap: fileTap(options.progressFile) } : {}));
 
-  const phases = buildPhases(preset, baseName, outDirAbs);
+  const phases = buildPhases(preset, baseName, outDirAbs, single);
   const startedAt = Date.now();
 
   type StartPhase = Extract<ProgressEvent, { type: "start" }>["phases"][number];
@@ -158,7 +165,7 @@ export async function compressCommand(
   }
 
   let htmlPreviewPath: string | null = null;
-  if (artifacts.length > 0) {
+  if (artifacts.length > 0 && !single) {
     htmlPreviewPath = await writePreview({
       outDir: outDirAbs,
       baseName,
@@ -196,7 +203,14 @@ export async function compressCommand(
   return { input: inputAbs, preset: preset.id, outDir: outDirAbs, artifacts };
 }
 
-function buildPhases(preset: Preset, baseName: string, outDir: string): PhaseInfo[] {
+function buildPhases(
+  preset: Preset,
+  baseName: string,
+  outDir: string,
+  single: boolean,
+): PhaseInfo[] {
+  if (single) return buildSinglePhase(preset, baseName, outDir);
+
   const phases: PhaseInfo[] = [];
   for (const out of preset.outputs) {
     phases.push({
@@ -228,6 +242,39 @@ function buildPhases(preset: Preset, baseName: string, outDir: string): PhaseInf
     });
   }
   return phases;
+}
+
+/**
+ * Single-output mode: pick the preset's primary deliverable (first video
+ * output, or the gif for gif-only presets) and skip everything else —
+ * posters, alternate codecs, HTML preview. The artifact name is
+ * `<basename>.optimized.<ext>` so the intent reads cleanly to end users.
+ */
+function buildSinglePhase(preset: Preset, baseName: string, outDir: string): PhaseInfo[] {
+  const primary = preset.outputs[0];
+  if (primary) {
+    return [
+      {
+        name: `${primary.codec}/${primary.container}`,
+        kind: "video",
+        outPath: join(outDir, `${baseName}.optimized.${primary.container}`),
+        codec: primary.codec,
+        container: primary.container,
+        spec: primary,
+      },
+    ];
+  }
+  if (preset.gif) {
+    return [
+      {
+        name: "gif",
+        kind: "gif",
+        outPath: join(outDir, `${baseName}.optimized.gif`),
+        spec: preset.gif,
+      },
+    ];
+  }
+  throw new Error(`Preset ${preset.id} has no primary output to encode`);
 }
 
 interface RunPhaseArgs {

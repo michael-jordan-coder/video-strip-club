@@ -53,6 +53,7 @@ program
   .option("--json", "emit NDJSON progress events to stdout instead of pretty output")
   .option("--progress-file <path>", "tee NDJSON progress events to this file (works in either mode)")
   .option("--force", "re-encode every output even if an up-to-date version exists")
+  .option("--single", "produce only the primary output (skip alternate codecs, posters, HTML preview); names the file <basename>.optimized.<ext>")
   .action(async (input: string, opts: {
     preset: PresetId;
     outDir?: string;
@@ -61,6 +62,7 @@ program
     json?: boolean;
     progressFile?: string;
     force?: boolean;
+    single?: boolean;
   }) => {
     jsonMode = opts.json === true;
     await compressCommand(input, {
@@ -71,6 +73,7 @@ program
       jsonMode,
       progressFile: opts.progressFile,
       force: opts.force === true,
+      single: opts.single === true,
     });
   });
 

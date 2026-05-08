@@ -51,14 +51,30 @@ export interface EncodeHandle {
  * `error` event already emitted). On normal completion neither callback is
  * called after the `done` event — the consumer cleans up there.
  */
+export interface StartEncodeOptions {
+  outDir: string;
+  single?: boolean;
+}
+
 export function startEncode(
   file: string,
   preset: PresetId,
+  options: StartEncodeOptions,
   onEvent: (event: ProgressEvent) => void,
   onError: (message: string) => void,
 ): EncodeHandle {
   const bin = findVscBin();
-  const child = spawn(bin, ["compress", resolve(file), "--preset", preset, "--json"], {
+  const args = [
+    "compress",
+    resolve(file),
+    "--preset",
+    preset,
+    "--out-dir",
+    resolve(options.outDir),
+    "--json",
+  ];
+  if (options.single ?? true) args.push("--single");
+  const child = spawn(bin, args, {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
