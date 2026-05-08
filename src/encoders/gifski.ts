@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { TailBuffer } from "../lib/exec.ts";
 import { FFMPEG_BASE_ARGS, trimArgs } from "../lib/ffargs.ts";
+import { withAtomicWrite } from "../lib/atomic.ts";
 import type { GifSpec, ProbeResult } from "../types.ts";
 
 const STDERR_TAIL_BYTES = 8 * 1024;
@@ -22,6 +23,15 @@ export async function buildGifWithGifski(
 ): Promise<void> {
   const { spec, probe } = options;
 
+  await withAtomicWrite(output, (tempPath) => runFfmpegToGifski(input, tempPath, spec, probe));
+}
+
+function runFfmpegToGifski(
+  input: string,
+  tempPath: string,
+  spec: GifSpec,
+  probe: ProbeResult,
+): Promise<void> {
   const ffmpegArgs = [
     ...FFMPEG_BASE_ARGS,
     ...trimArgs(spec.durationSec, probe.format.durationSec),
@@ -44,7 +54,7 @@ export async function buildGifWithGifski(
     "--quality",
     String(spec.quality),
     "-o",
-    output,
+    tempPath,
     "-",
   ];
 

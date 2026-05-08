@@ -5,6 +5,7 @@ import {
   buildLongestEdgeScale,
   trimArgs,
 } from "../lib/ffargs.ts";
+import { withAtomicWrite } from "../lib/atomic.ts";
 import type { OutputSpec, PosterSpec, GifSpec, ProbeResult } from "../types.ts";
 
 // Capped-CRF VBV tuning. h264 honors -maxrate/-bufsize to bound bitrate spikes
@@ -28,27 +29,30 @@ export async function encodeVideo(
   options: EncodeOptions,
 ): Promise<void> {
   const { spec, probe, onProgress } = options;
-  const args: string[] = [...FFMPEG_BASE_ARGS, "-stats", "-i", input];
 
-  const filters = buildVideoFilters(spec);
-  if (filters) args.push("-vf", filters);
+  await withAtomicWrite(output, async (tempPath) => {
+    const args: string[] = [...FFMPEG_BASE_ARGS, "-stats", "-i", input];
 
-  args.push(...buildVideoCodecArgs(spec));
-  args.push(...buildAudioCodecArgs(spec, probe));
-  args.push(...buildContainerArgs(spec));
+    const filters = buildVideoFilters(spec);
+    if (filters) args.push("-vf", filters);
 
-  args.push(output);
+    args.push(...buildVideoCodecArgs(spec));
+    args.push(...buildAudioCodecArgs(spec, probe));
+    args.push(...buildContainerArgs(spec));
 
-  await run("ffmpeg", args, {
-    onStderr: (chunk) => {
-      if (!onProgress) return;
-      // ffmpeg writes progress as a single carriage-returned line; split on \r and \n.
-      const lines = chunk.split(/[\r\n]/);
-      for (const line of lines) {
-        const p = parseFfmpegProgress(line);
-        if (p) onProgress(p);
-      }
-    },
+    args.push(tempPath);
+
+    await run("ffmpeg", args, {
+      onStderr: (chunk) => {
+        if (!onProgress) return;
+        // ffmpeg writes progress as a single carriage-returned line; split on \r and \n.
+        const lines = chunk.split(/[\r\n]/);
+        for (const line of lines) {
+          const p = parseFfmpegProgress(line);
+          if (p) onProgress(p);
+        }
+      },
+    });
   });
 }
 
@@ -153,32 +157,35 @@ export async function extractPoster(
   const { spec, probe } = options;
   const dur = probe.format.durationSec;
   const at = Math.max(0, Math.min(dur - POSTER_EOF_SAFETY_SEC, dur * spec.positionFraction));
-  const args: string[] = [
-    ...FFMPEG_BASE_ARGS,
-    "-ss",
-    at.toFixed(3),
-    "-i",
-    input,
-    "-frames:v",
-    "1",
-  ];
 
-  if (spec.longestEdge != null) {
-    args.push("-vf", buildLongestEdgeScale(spec.longestEdge));
-  }
+  await withAtomicWrite(output, async (tempPath) => {
+    const args: string[] = [
+      ...FFMPEG_BASE_ARGS,
+      "-ss",
+      at.toFixed(3),
+      "-i",
+      input,
+      "-frames:v",
+      "1",
+    ];
 
-  if (format === "jpg") {
-    args.push("-q:v", String(spec.jpegQ ?? 3));
-  } else {
-    args.push(
-      "-c:v", "libwebp",
-      "-quality", String(spec.webpQ ?? 82),
-      "-compression_level", "6",
-    );
-  }
+    if (spec.longestEdge != null) {
+      args.push("-vf", buildLongestEdgeScale(spec.longestEdge));
+    }
 
-  args.push(output);
-  await run("ffmpeg", args);
+    if (format === "jpg") {
+      args.push("-q:v", String(spec.jpegQ ?? 3));
+    } else {
+      args.push(
+        "-c:v", "libwebp",
+        "-quality", String(spec.webpQ ?? 82),
+        "-compression_level", "6",
+      );
+    }
+
+    args.push(tempPath);
+    await run("ffmpeg", args);
+  });
 }
 
 export interface PaletteGifOptions {
@@ -201,17 +208,19 @@ export async function buildGifWithPalette(
     `fps=${spec.fps},scale=${spec.width}:-2:flags=lanczos,split[a][b];` +
     `[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`;
 
-  const args = [
-    ...FFMPEG_BASE_ARGS,
-    ...trimArgs(spec.durationSec, probe.format.durationSec),
-    "-i",
-    input,
-    "-filter_complex",
-    filterChain,
-    "-loop",
-    "0",
-    output,
-  ];
+  await withAtomicWrite(output, async (tempPath) => {
+    const args = [
+      ...FFMPEG_BASE_ARGS,
+      ...trimArgs(spec.durationSec, probe.format.durationSec),
+      "-i",
+      input,
+      "-filter_complex",
+      filterChain,
+      "-loop",
+      "0",
+      tempPath,
+    ];
 
-  await run("ffmpeg", args);
+    await run("ffmpeg", args);
+  });
 }
