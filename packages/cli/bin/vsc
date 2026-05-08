@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve this script's real location, following symlinks. npm workspaces
+# expose `node_modules/.bin/vsc` as a symlink into packages/cli/bin/vsc, so
+# we cannot rely on dirname(BASH_SOURCE) without dereferencing first.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+PKG_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+
+# Walk up looking for a node_modules with tsx. Handles workspace-hoisted
+# installs (tsx at the monorepo root) and package-local installs.
+find_tsx() {
+  local dir="$PKG_ROOT"
+  while [ "$dir" != "/" ]; do
+    if [ -x "$dir/node_modules/.bin/tsx" ]; then
+      printf '%s\n' "$dir/node_modules/.bin/tsx"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+if ! TSX="$(find_tsx)"; then
+  echo "vsc: tsx not found — run 'npm install' in the monorepo root" >&2
+  exit 1
+fi
+exec "$TSX" "$PKG_ROOT/src/cli.ts" "$@"

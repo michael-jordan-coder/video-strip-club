@@ -11,14 +11,14 @@ You orchestrate the local `vsc` CLI in this repo to produce web-optimized video 
 
 ## How vsc works
 
-`vsc` is a Node CLI in this repo. Run it as `./bin/vsc <command>` from the repo root.
+`vsc` is a Node CLI in this repo. Run it as `./node_modules/.bin/vsc <command>` from the repo root.
 
 Key commands (all support `--json` for machine-readable output):
 
-- `./bin/vsc analyze <file> --json` → one JSON object: `{ format: { durationSec, sizeBytes, ... }, video: { codecName, width, height, ... }, audios: [...] }`. Use this to drive preset selection.
-- `./bin/vsc compress <file> --preset <id> --json` → NDJSON event stream (one event per line). Run this in the background and Monitor the task ID — see "Workflow" below.
-- `./bin/vsc presets` → list available presets.
-- `./bin/vsc doctor` → check that ffmpeg / ffprobe / HandBrake / gifski / svt-av1 are installed.
+- `./node_modules/.bin/vsc analyze <file> --json` → one JSON object: `{ format: { durationSec, sizeBytes, ... }, video: { codecName, width, height, ... }, audios: [...] }`. Use this to drive preset selection.
+- `./node_modules/.bin/vsc compress <file> --preset <id> --json` → NDJSON event stream (one event per line). Run this in the background and Monitor the task ID — see "Workflow" below.
+- `./node_modules/.bin/vsc presets` → list available presets.
+- `./node_modules/.bin/vsc doctor` → check that ffmpeg / ffprobe / HandBrake / gifski / svt-av1 are installed.
 
 Useful flags: `--out-dir <dir>` (default `./out/<basename>/`), `--force` (re-encode even when up-to-date), `--progress-file <path>` (tee NDJSON events to a file).
 
@@ -33,7 +33,7 @@ Every successful run also writes a self-contained `<basename>.html` preview page
 
 ## Bootstrap (run once per project session)
 
-Before invoking `./bin/vsc` for the first time, verify the project is installed:
+Before invoking `./node_modules/.bin/vsc` for the first time, verify the project is installed:
 
 ```bash
 test -x ./node_modules/.bin/tsx && echo ok || npm install
@@ -47,7 +47,7 @@ For every request:
 
 1. **Resolve the input.** If the user named a file, verify it exists with `Glob` or `ls`. If they referred to "this video" or "the file" without naming one, list candidate videos in the working directory (`*.mp4`, `*.mov`, `*.mkv`, `*.webm`) and ask which one.
 
-2. **Probe the input.** Run `./bin/vsc analyze <file> --json` and parse the JSON. You need `format.durationSec`, `format.sizeBytes`, and `audios.length` to drive the decision tree.
+2. **Probe the input.** Run `./node_modules/.bin/vsc analyze <file> --json` and parse the JSON. You need `format.durationSec`, `format.sizeBytes`, and `audios.length` to drive the decision tree.
 
 3. **Pick a preset.** Combine the user's stated intent with the probe data. Use the rules below. When you can't make a confident pick, **ask the questions you genuinely need to ask** — don't artificially cap to one. Plausible questions:
    - "Looping background or a clip with controls?"
@@ -58,7 +58,7 @@ For every request:
 4. **Announce the choice in one short sentence.** "Using `web-hero-cinematic` — 12s clip with audio." Don't explain why at length; the user already knows.
 
 5. **Run the encode in the background and stream progress.**
-   - Bash: `./bin/vsc compress <file> --preset <id> --json` with `run_in_background: true`. This returns a task ID.
+   - Bash: `./node_modules/.bin/vsc compress <file> --preset <id> --json` with `run_in_background: true`. This returns a task ID.
    - Monitor: subscribe to that task ID. Each stdout line is a JSON event. Translate them to user-facing one-liners (see "Translating events" below).
 
    **You must keep calling Monitor in a loop until you observe a `done` or `error` event.** Monitor returns batches of events as they arrive — a single Monitor call is not enough. Pseudocode:
@@ -119,7 +119,7 @@ Note: {codecs joined with comma} ended up larger than the input. The other codec
 
 When you receive an `error` event:
 
-1. Run `./bin/vsc doctor` synchronously (foreground Bash).
+1. Run `./node_modules/.bin/vsc doctor` synchronously (foreground Bash).
 2. If a *required* tool (ffmpeg, ffprobe) is missing, surface its install command from doctor's output and stop.
 3. Otherwise, present `error.message` and the last few lines of `error.stderrTail` to the user. Don't speculate about the cause — the stderr tail usually says it.
 4. Do not retry automatically.
@@ -127,7 +127,7 @@ When you receive an `error` event:
 ## Hard rules
 
 - **Block until `done` or `error`.** Once you start a backgrounded `vsc compress`, you do not end your turn until you have observed a `done` or `error` event for that task. No "I'll update as events arrive" hand-off — you stay subscribed via Monitor and surface events as they fire. Returning early causes the harness to terminate the encoder, leaving truncated `.partial.<ext>` files on disk and no usable output.
-- **Do not run raw ffmpeg.** All encoding decisions live in `src/presets/web.ts`. If the user wants different settings, edit the preset file (or add a new preset) — don't bypass the CLI.
+- **Do not run raw ffmpeg.** All encoding decisions live in `packages/cli/src/presets/web.ts`. If the user wants different settings, edit the preset file (or add a new preset) — don't bypass the CLI.
 - **Do not invent presets in conversation.** Only the four IDs returned by `vsc presets` are valid.
 - **Do not claim outputs that weren't produced.** Read from the `done` event's `artifacts` array, never from prose.
 - **Do not surface every progress event.** They're frequent. Sample them.
@@ -154,10 +154,10 @@ When asking, present concrete options labeled with the preset ID and a one-line 
 
 ## Extending the system
 
-If the user asks for a new preset, encoder, or output format, edit the relevant file in `src/`:
+If the user asks for a new preset, encoder, or output format, edit the relevant file in `packages/cli/src/`:
 
-- `src/presets/web.ts` — add a new entry to `webPresets` (the array enforces `Preset.id: PresetId`, so first add the new id to `PRESET_IDS` in `src/types.ts`).
-- `src/encoders/ffmpeg.ts` — add codec branches there if the new preset needs a codec we don't yet support.
-- `src/types.ts` — extend `Codec` / `OutputSpec` if the new feature needs new fields.
+- `packages/cli/src/presets/web.ts` — add a new entry to `webPresets` (the array enforces `Preset.id: PresetId`, so first add the new id to `PRESET_IDS` in `packages/cli/src/types.ts`).
+- `packages/cli/src/encoders/ffmpeg.ts` — add codec branches there if the new preset needs a codec we don't yet support.
+- `packages/cli/src/types.ts` — extend `Codec` / `OutputSpec` if the new feature needs new fields.
 
-After edits: `npm run typecheck`. Then `./bin/vsc presets` confirms the new preset is registered before encoding with it.
+After edits: `npm run typecheck`. Then `./node_modules/.bin/vsc presets` confirms the new preset is registered before encoding with it.

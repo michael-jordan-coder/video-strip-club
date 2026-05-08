@@ -11,10 +11,10 @@ The CLI is the engine. The agent is the orchestrator. They share the same set of
 
 ```bash
 npm install
-./bin/vsc doctor               # check ffmpeg/HandBrake/gifski/svt-av1
-./bin/vsc presets              # list available presets
-./bin/vsc analyze video.mp4    # codec, resolution, duration, bitrate
-./bin/vsc compress video.mp4 --preset web-hero-loop
+./node_modules/.bin/vsc doctor               # check ffmpeg/HandBrake/gifski/svt-av1
+./node_modules/.bin/vsc presets              # list available presets
+./node_modules/.bin/vsc analyze video.mp4    # codec, resolution, duration, bitrate
+./node_modules/.bin/vsc compress video.mp4 --preset web-hero-loop
 ```
 
 Every successful run also writes a self-contained `<basename>.html` preview page next to the artifacts — `open` it to see the encoded video, file sizes, and a copy-paste `<video>` snippet.
@@ -24,7 +24,7 @@ Outputs land in `./out/<basename>/` next to the input by default. Override with 
 To make `vsc` available globally:
 
 ```bash
-npm link    # then `vsc compress …` from anywhere
+npm --workspace @vsc/cli link    # then `vsc compress …` from anywhere
 ```
 
 ### Caching
@@ -36,10 +36,10 @@ Re-running `vsc compress` skips outputs whose mtime is newer than the input — 
 Both `analyze` and `compress` accept `--json`:
 
 ```bash
-./bin/vsc analyze video.mp4 --json
+./node_modules/.bin/vsc analyze video.mp4 --json
 # {"format": {...}, "video": {...}, "audios": [...]}
 
-./bin/vsc compress video.mp4 --preset web-hero-loop --json
+./node_modules/.bin/vsc compress video.mp4 --preset web-hero-loop --json
 # NDJSON event stream: start → phase-start → progress → phase-done → ... → done
 ```
 
@@ -72,35 +72,46 @@ The CLI warns when an output ends up larger than the input. That's expected when
 | HandBrakeCLI  | optional | Alternative HEVC encoder via `--encoder handbrake`.                       | `brew install handbrake` |
 | gifski        | optional | High-quality GIFs in the `web-thumbnail-gif` preset (better than palettegen). Falls back to ffmpeg if missing. | `brew install gifski`    |
 
-Run `./bin/vsc doctor` to see which are present on your machine.
+Run `./node_modules/.bin/vsc doctor` to see which are present on your machine.
 
-## Project layout
+## Repo layout
+
+This is an npm-workspaces monorepo. Every package lives under `packages/`.
 
 ```
-src/
-├── cli.ts                 # commander entry
-├── types.ts               # Preset, OutputSpec, ProbeResult, ProgressEvent
-├── lib/
-│   ├── probe.ts           # ffprobe wrapper
-│   ├── exec.ts            # spawn + ffmpeg progress parser + tail-buffered stderr
-│   ├── deps.ts            # tool detection (memoized)
-│   ├── log.ts             # spinners, colors, byte/duration formatters
-│   ├── reporter.ts        # PrettyReporter + JsonReporter behind a Reporter interface
-│   ├── ffargs.ts          # shared ffmpeg arg helpers (base args, scale, trim)
-│   └── preview.ts         # generates <basename>.html
-├── encoders/
-│   ├── ffmpeg.ts          # encodeVideo, extractPoster, palette-GIF fallback
-│   ├── gifski.ts          # ffmpeg → gifski pipe
-│   └── handbrake.ts       # optional HEVC alt
-├── presets/
-│   └── web.ts             # the four web delivery presets
-└── commands/
-    ├── analyze.ts         # human + --json modes
-    ├── compress.ts        # encode bundle + caching + HTML preview + event stream
-    ├── batch.ts           # apply a preset to a directory
-    ├── doctor.ts
-    └── presets.ts
+packages/
+└── cli/                       # @vsc/cli — the encoding engine
+    ├── bin/vsc                # bash launcher (resolves to symlinked workspace tsx)
+    ├── package.json
+    ├── tsconfig.json
+    └── src/
+        ├── cli.ts             # commander entry
+        ├── types.ts           # Preset, OutputSpec, ProbeResult, ProgressEvent
+        ├── lib/
+        │   ├── probe.ts       # ffprobe wrapper
+        │   ├── exec.ts        # spawn + ffmpeg progress parser + tail-buffered stderr
+        │   ├── deps.ts        # tool detection (memoized)
+        │   ├── log.ts         # spinners, colors, byte/duration formatters
+        │   ├── reporter.ts    # PrettyReporter + JsonReporter behind a Reporter interface
+        │   ├── ffargs.ts      # shared ffmpeg arg helpers (base args, scale, trim)
+        │   ├── codec.ts       # VIDEO_SOURCE_ORDER + <source> emitter
+        │   ├── atomic.ts      # withAtomicWrite — kill-safe encode-then-rename
+        │   └── preview.ts     # generates <basename>.html
+        ├── encoders/
+        │   ├── ffmpeg.ts      # encodeVideo, extractPoster, palette-GIF fallback
+        │   ├── gifski.ts      # ffmpeg → gifski pipe
+        │   └── handbrake.ts   # optional HEVC alt
+        ├── presets/
+        │   └── web.ts         # the four web delivery presets
+        └── commands/
+            ├── analyze.ts     # human + --json modes
+            ├── compress.ts    # encode bundle + caching + HTML preview + event stream
+            ├── batch.ts       # apply a preset to a directory
+            ├── doctor.ts
+            └── presets.ts
 ```
+
+Run `npm install` from the repo root to bootstrap; npm hoists shared deps and symlinks `node_modules/.bin/vsc` to `packages/cli/bin/vsc` so `./node_modules/.bin/vsc` works from anywhere in the tree.
 
 ## The Claude Code agent
 
@@ -117,11 +128,11 @@ It is constrained to **only** invoke the CLI; it will not call ffmpeg directly. 
 
 ## Adding a preset
 
-1. Append to `webPresets` in `src/presets/web.ts`.
-2. If it needs a codec we don't yet support (e.g. h264-baseline, AV1 with grain synth), add a branch in `src/encoders/ffmpeg.ts` and update the `Codec` union in `src/types.ts`.
-3. `npm run typecheck`.
-4. `./bin/vsc presets` confirms it shows up.
+1. Append to `webPresets` in `packages/cli/src/presets/web.ts`.
+2. If it needs a codec we don't yet support (e.g. h264-baseline, AV1 with grain synth), add a branch in `packages/cli/src/encoders/ffmpeg.ts` and update the `Codec` union in `packages/cli/src/types.ts`.
+3. `npm run typecheck` (runs across all workspaces).
+4. `./node_modules/.bin/vsc presets` confirms it shows up.
 
 ## Adding a new encoder
 
-`src/encoders/` is one file per tool. Each file exports a single function with the shape `(input: string, output: string, opts) => Promise<void>`. Wire it into `src/commands/compress.ts` — that's the only consumer.
+`packages/cli/src/encoders/` is one file per tool. Each file exports a single function with the shape `(input: string, output: string, opts) => Promise<void>`. Wire it into `packages/cli/src/commands/compress.ts` — that's the only consumer.
