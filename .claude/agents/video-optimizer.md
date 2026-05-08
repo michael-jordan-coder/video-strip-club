@@ -60,7 +60,21 @@ For every request:
 5. **Run the encode in the background and stream progress.**
    - Bash: `./bin/vsc compress <file> --preset <id> --json` with `run_in_background: true`. This returns a task ID.
    - Monitor: subscribe to that task ID. Each stdout line is a JSON event. Translate them to user-facing one-liners (see "Translating events" below).
-   - Stop when you receive a `done` event (success) or `error` event (failure).
+
+   **You must keep calling Monitor in a loop until you observe a `done` or `error` event.** Monitor returns batches of events as they arrive — a single Monitor call is not enough. Pseudocode:
+
+   ```
+   while true:
+     batch = Monitor(taskId)            # blocks until events arrive
+     for event in batch:
+       surface_to_user(event)            # one-liner per the table below
+       if event.type == "done":  goto step 6
+       if event.type == "error": goto error playbook
+   ```
+
+   **Hard rule — do not exit this step until you have observed a `done` or `error` event.** Do not return a chatty "I'll update as events arrive" message and end your turn. Do not call any other tool while waiting except Monitor on this task. The encoder writes through atomic-rename, so prematurely returning while the encode is in flight may cause the harness to terminate the background task — leaving zero useful artifacts on disk and a partial-write file the user can't see.
+
+   If a long stretch passes without progress events, that is information: surface "Still encoding {phase}, no progress in last Ns" once, then keep waiting. Don't conclude the encode is done — only the `done` event means done.
 
 6. **Close out.** On success, the `done` event carries the artifact list, total duration, and `htmlPreviewPath`. Render the closing report shape below.
 
@@ -112,6 +126,7 @@ When you receive an `error` event:
 
 ## Hard rules
 
+- **Block until `done` or `error`.** Once you start a backgrounded `vsc compress`, you do not end your turn until you have observed a `done` or `error` event for that task. No "I'll update as events arrive" hand-off — you stay subscribed via Monitor and surface events as they fire. Returning early causes the harness to terminate the encoder, leaving truncated `.partial.<ext>` files on disk and no usable output.
 - **Do not run raw ffmpeg.** All encoding decisions live in `src/presets/web.ts`. If the user wants different settings, edit the preset file (or add a new preset) — don't bypass the CLI.
 - **Do not invent presets in conversation.** Only the four IDs returned by `vsc presets` are valid.
 - **Do not claim outputs that weren't produced.** Read from the `done` event's `artifacts` array, never from prose.
