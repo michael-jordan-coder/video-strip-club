@@ -7,9 +7,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is an npm-workspaces monorepo (`workspaces: ["packages/*"]`). Packages today:
 
 - `@vsc/cli` at `packages/cli/` — the encoding engine (commander CLI, NDJSON event stream, ffmpeg/HandBrake/gifski wrappers).
-- `@vsc/tui` at `packages/tui/` — Ink-based terminal UI that drives `@vsc/cli` via subprocess and consumes its NDJSON event stream as React state.
+- `@vsc/tui` at `packages/tui/` — Ink TUI that embeds the Claude Agent SDK (`@anthropic-ai/sdk` + `betaZodTool` + `client.beta.messages.toolRunner` with `stream: true`). The user types natural language; Claude calls vsc-shaped tools (`list_videos`, `analyze_video`, `list_presets`, `compress_video`) which spawn `@vsc/cli` as subprocesses and stream NDJSON events back into React state.
 
 Run `npm install` from the repo root to bootstrap; npm hoists shared deps and symlinks both bins (`node_modules/.bin/vsc`, `node_modules/.bin/vsc-ui`).
+
+`@vsc/tui` requires `ANTHROPIC_API_KEY` in the environment — the SDK reads it via the default `new Anthropic()` constructor. The TUI surfaces a clean error screen at startup if the var is missing.
+
+### Agent + caching strategy in `@vsc/tui`
+
+- Model: `claude-haiku-4-5` (low latency for an interactive chat surface; tool calls here are simple enum/file picks).
+- Caching: top-level `cache_control: {type: "ephemeral"}` on every `toolRunner` call lets the API auto-cache the system prompt + tool definitions. Don't interpolate per-request volatile content (timestamps, UUIDs) into the system prompt — it would silently invalidate the cache prefix. The cwd lives there because it's stable across a session.
+- Conversation history is text-only (`{role, content: string}` pairs) — within-turn tool_use/tool_result roundtrips are handled by the runner; we don't reconstruct them across turns.
+- Tools push live state to React via an `AgentSubscriber` ref (`onToolStart` / `onToolProgress` / `onToolEnd`). The `compress_video` tool's `run` returns a Promise that resolves on the `done` event so the agent loop properly awaits encoding.
 
 The TUI duplicates a small subset of `@vsc/cli`'s wire types (`PresetId`, `ProgressEvent`, etc.) at `packages/tui/src/types.ts`. When a third consumer (e.g. a web frontend) appears, extract those types into a shared `@vsc/core` package — the TUI's `types.ts` has a comment marking the boundary.
 
