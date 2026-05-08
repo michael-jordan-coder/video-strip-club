@@ -8,6 +8,8 @@
   ],
   "scripts": {
     "vsc": "npm --workspace @vsc/cli run vsc --",
+    "strip-club": "npm --workspace @vsc/tui run vsc-ui --",
+    "strip club": "npm --workspace @vsc/tui run vsc-ui --",
     "typecheck": "npm run --workspaces --if-present typecheck",
     "build": "npm run --workspaces --if-present build"
   },
