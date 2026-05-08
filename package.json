@@ -1,0 +1,25 @@
+{
+  "name": "video-strip-club",
+  "version": "0.1.0",
+  "description": "Open-source video optimization for web delivery, wrapped as a CLI and a Claude Code subagent.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "vsc": "./bin/vsc"
+  },
+  "scripts": {
+    "vsc": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

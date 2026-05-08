@@ -1,0 +1,127 @@
+# video-strip-club
+
+Open-source video optimization for web delivery, packaged two ways:
+
+- **`vsc`** — a Node CLI that wraps ffmpeg / svt-av1 / gifski / HandBrake behind opinionated web-delivery presets, with poster extraction and a ready-to-paste `<video>` snippet.
+- **`video-optimizer`** — a Claude Code subagent (`.claude/agents/video-optimizer.md`) that drives the CLI, picking presets based on the input's duration, audio, and the user's intent.
+
+The CLI is the engine. The agent is the orchestrator. They share the same set of presets in `src/presets/web.ts`.
+
+## Quickstart
+
+```bash
+npm install
+./bin/vsc doctor               # check ffmpeg/HandBrake/gifski/svt-av1
+./bin/vsc presets              # list available presets
+./bin/vsc analyze video.mp4    # codec, resolution, duration, bitrate
+./bin/vsc compress video.mp4 --preset web-hero-loop
+```
+
+Every successful run also writes a self-contained `<basename>.html` preview page next to the artifacts — `open` it to see the encoded video, file sizes, and a copy-paste `<video>` snippet.
+
+Outputs land in `./out/<basename>/` next to the input by default. Override with `--out-dir`.
+
+To make `vsc` available globally:
+
+```bash
+npm link    # then `vsc compress …` from anywhere
+```
+
+### Caching
+
+Re-running `vsc compress` skips outputs whose mtime is newer than the input — useful when iterating on one preset knob without re-encoding the whole bundle. Pass `--force` to re-encode regardless.
+
+### Machine-readable mode
+
+Both `analyze` and `compress` accept `--json`:
+
+```bash
+./bin/vsc analyze video.mp4 --json
+# {"format": {...}, "video": {...}, "audios": [...]}
+
+./bin/vsc compress video.mp4 --preset web-hero-loop --json
+# NDJSON event stream: start → phase-start → progress → phase-done → ... → done
+```
+
+The Claude Code subagent uses `--json` plus `Bash(run_in_background: true)` and `Monitor` to surface live progress to the user during long encodes. Add `--progress-file <path>` to also tee the event stream to a file.
+
+Event types: `start`, `phase-start`, `progress`, `phase-done`, `warning`, `done`, `error` — see `src/types.ts` for the full discriminated union.
+
+## Presets
+
+| ID                    | When to use                                                                  | Codecs in bundle                |
+| --------------------- | ---------------------------------------------------------------------------- | ------------------------------- |
+| `web-hero-loop`       | Muted, autoplaying, looping background hero (no audio).                      | h264 + h265 + AV1 + VP9 + poster |
+| `web-hero-cinematic`  | Brand cinematic with audio. Higher bitrate budget.                           | h264 + h265 + AV1 + VP9 + poster |
+| `web-product-demo`    | Talking-head / screen recording / longer demo. 720p balanced.                | h264 + h265 + VP9 + poster       |
+| `web-thumbnail-gif`   | Email-safe / thumbnail / preview. Looping GIF + poster.                      | gif (gifski → ffmpeg fallback) + poster |
+
+All MP4 outputs use `+faststart` (moov atom at front, so progressive download streams). HEVC outputs are tagged `hvc1` for Safari/QuickTime compatibility. The HTML snippet emits sources in **AV1 → h265 → VP9 → h264** order — browsers pick the first they can decode.
+
+### Already-compressed inputs
+
+The CLI warns when an output ends up larger than the input. That's expected when re-encoding an already-tightly-compressed source — modern codecs (h265/AV1) typically still win on the same source, but the legacy h264 fallback may not. Drop the oversized output from your `<video>` sources, or re-run from a higher-bitrate master if you have one.
+
+## Tools used
+
+| Tool          | Required | Used for                                                                  | Install                  |
+| ------------- | -------- | ------------------------------------------------------------------------- | ------------------------ |
+| ffmpeg        | yes      | h264 (libx264), h265 (libx265), AV1 (libsvtav1), VP9 (libvpx-vp9), posters, palette-based GIF fallback | `brew install ffmpeg`    |
+| ffprobe       | yes      | Stream analysis                                                            | (bundled with ffmpeg)    |
+| svt-av1       | optional | Standalone AV1 encoder. ffmpeg's `libsvtav1` already covers this path.    | `brew install svt-av1`   |
+| HandBrakeCLI  | optional | Alternative HEVC encoder via `--encoder handbrake`.                       | `brew install handbrake` |
+| gifski        | optional | High-quality GIFs in the `web-thumbnail-gif` preset (better than palettegen). Falls back to ffmpeg if missing. | `brew install gifski`    |
+
+Run `./bin/vsc doctor` to see which are present on your machine.
+
+## Project layout
+
+```
+src/
+├── cli.ts                 # commander entry
+├── types.ts               # Preset, OutputSpec, ProbeResult, ProgressEvent
+├── lib/
+│   ├── probe.ts           # ffprobe wrapper
+│   ├── exec.ts            # spawn + ffmpeg progress parser + tail-buffered stderr
+│   ├── deps.ts            # tool detection (memoized)
+│   ├── log.ts             # spinners, colors, byte/duration formatters
+│   ├── reporter.ts        # PrettyReporter + JsonReporter behind a Reporter interface
+│   ├── ffargs.ts          # shared ffmpeg arg helpers (base args, scale, trim)
+│   └── preview.ts         # generates <basename>.html
+├── encoders/
+│   ├── ffmpeg.ts          # encodeVideo, extractPoster, palette-GIF fallback
+│   ├── gifski.ts          # ffmpeg → gifski pipe
+│   └── handbrake.ts       # optional HEVC alt
+├── presets/
+│   └── web.ts             # the four web delivery presets
+└── commands/
+    ├── analyze.ts         # human + --json modes
+    ├── compress.ts        # encode bundle + caching + HTML preview + event stream
+    ├── batch.ts           # apply a preset to a directory
+    ├── doctor.ts
+    └── presets.ts
+```
+
+## The Claude Code agent
+
+The `.claude/agents/video-optimizer.md` subagent activates on prompts like *"optimize this for our hero section"* or *"shrink this product demo"*. Workflow:
+
+1. Bootstraps (`npm install`) on first run if needed.
+2. Runs `vsc analyze --json` to get duration / audio / dimensions.
+3. Picks a preset from the decision tree, or asks the user when ambiguous (via `AskUserQuestion`).
+4. Runs `vsc compress --json` in the background (`Bash` with `run_in_background: true`).
+5. Streams progress via `Monitor` — surfaces live one-liners like `[h264/mp4 47%] · 2/6 phases done`.
+6. On completion, reports `Preview: open <htmlPreviewPath>` with the artifact list.
+
+It is constrained to **only** invoke the CLI; it will not call ffmpeg directly. Allowed tools: `Bash, Read, Glob, Monitor, AskUserQuestion`. To change encoding behavior, edit `src/presets/web.ts` and re-run `npm run typecheck`.
+
+## Adding a preset
+
+1. Append to `webPresets` in `src/presets/web.ts`.
+2. If it needs a codec we don't yet support (e.g. h264-baseline, AV1 with grain synth), add a branch in `src/encoders/ffmpeg.ts` and update the `Codec` union in `src/types.ts`.
+3. `npm run typecheck`.
+4. `./bin/vsc presets` confirms it shows up.
+
+## Adding a new encoder
+
+`src/encoders/` is one file per tool. Each file exports a single function with the shape `(input: string, output: string, opts) => Promise<void>`. Wire it into `src/commands/compress.ts` — that's the only consumer.
