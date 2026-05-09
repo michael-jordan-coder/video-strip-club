@@ -65,5 +65,7 @@ export type ProgressEvent =
       durationMs: number;
       htmlPreviewPath: string | null;
       oversizedCodecs: Codec[];
+      cachedPhases: number;
+      encodedPhases: number;
     }
   | { type: "error"; phase: string; message: string; stderrTail: string };

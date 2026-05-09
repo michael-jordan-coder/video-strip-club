@@ -17,10 +17,24 @@ Key commands (all support `--json` for machine-readable output):
 
 - `./node_modules/.bin/vsc analyze <file> --json` → one JSON object: `{ format: { durationSec, sizeBytes, ... }, video: { codecName, width, height, ... }, audios: [...] }`. Use this to drive preset selection.
 - `./node_modules/.bin/vsc compress <file> --preset <id> --json` → NDJSON event stream (one event per line). Run this in the background and Monitor the task ID — see "Workflow" below.
-- `./node_modules/.bin/vsc presets` → list available presets.
+- `./node_modules/.bin/vsc estimate <file> --preset <id>` → one JSON object: `{schemaVersion, input, durationSec, totalBytes, totalSeconds, phases: [{name, kind, estimatedSizeBytes, estimatedSeconds, encoder}, ...]}`. Use this for **pre-flight estimation** on any input longer than ~30s before committing to the encode — surface "≈X MB across N phases, ~Y seconds" so the user can confirm scope. Accepts the same `--override` flags as `compress`.
+- `./node_modules/.bin/vsc presets --json` → one JSON object: `{schemaVersion, presets: [{id, title, summary, codecs, containers, hasGif, hasPoster, maxEdge, audio}]}`. **This is the source of truth for available presets.** Don't hardcode the preset list — call this command.
 - `./node_modules/.bin/vsc doctor` → check that ffmpeg / ffprobe / HandBrake / gifski / svt-av1 are installed.
 
-Useful flags: `--out-dir <dir>` (default `./out/<basename>/`), `--force` (re-encode even when up-to-date), `--progress-file <path>` (tee NDJSON events to a file).
+Useful flags: `--out-dir <dir>` (default `./out/<basename>/`), `--force` (re-encode even when up-to-date), `--progress-file <path>` (tee NDJSON events to a file), `--concurrency <n>` (run up to N video phases in parallel; default 2), `--override <key=value>` (per-call preset adjustments — repeatable).
+
+### Override grammar
+
+`--override key=value` lets you tweak a preset for one run without editing `web.ts`. Repeat the flag for multiple keys. Allowed keys:
+
+- `maxEdge=720` — resize longest edge in pixels.
+- `crf=24` — quality knob; lower is better. Encoder-specific scale.
+- `bitrateKbps=1500` — target mean bitrate.
+- `dropAudio=true|false` — force-drop or force-keep audio.
+- `singleCodec=h264|h265|av1|vp9` — filter the preset's outputs to one codec (still produces poster + HTML preview; orthogonal to `--single`).
+- `av1Encoder=svt|aom` — pick the AV1 encoder. `svt` (libsvtav1) is roughly 8–10× faster than `aom` (libaom-av1); default is `svt` when the binary is detected by `vsc doctor`.
+
+Example: `vsc compress hero.mp4 --preset web-hero-cinematic --override maxEdge=720 --override singleCodec=h264`.
 
 The four built-in presets:
 
@@ -101,6 +115,7 @@ After receiving `done`:
 
 ```
 Compressed {artifacts.length} artifact{s} in {durationMs formatted}.
+{if cachedPhases > 0: "{cachedPhases}/{cachedPhases+encodedPhases} reused from cache."}
 Preview: open {htmlPreviewPath}
 
   • {codec/container} · {sizeBytes formatted} · {relative path}
@@ -108,6 +123,8 @@ Preview: open {htmlPreviewPath}
 
 Copy the files to your project's public assets folder (e.g. public/videos/) when ready to ship.
 ```
+
+If `cachedPhases === phases.length`, surface "Everything was already up to date — nothing re-encoded." instead of the timing line.
 
 If `oversizedCodecs` is non-empty, append:
 
@@ -137,7 +154,9 @@ When you receive an `error` event:
 
 ## Decision tree
 
-Apply in order; first match wins:
+Apply in order; first match wins. The preset table picks **what** to encode; the action table that follows picks **how** to invoke it.
+
+### Preset selection
 
 | Signal                                                                | Preset                |
 |-----------------------------------------------------------------------|-----------------------|
@@ -150,7 +169,28 @@ Apply in order; first match wins:
 | Duration 15–30s **with** audio                                        | **ask** (AskUserQuestion: hero-cinematic vs product-demo) |
 | Anything else genuinely ambiguous                                     | **ask** what you need |
 
+### Action / override selection
+
+Match the user's secondary intent **after** picking a preset. These rows compose with each other (e.g. "smallest possible **and** my laptop is slow" stacks the overrides).
+
+| Signal | Action |
+|---|---|
+| User asks "how big?" / "how long?" / "will it fit X?" | Run `vsc estimate <file> --preset <id>` first; surface `~X MB across N phases, ~Y seconds`. Wait for confirmation before encoding. |
+| User says "smallest possible" / "the smallest" | Estimate with `--override singleCodec=av1 --override av1Encoder=svt` first. If estimated time is too long for the user's patience, fall back to `--override singleCodec=h265`. Then compress with the same overrides. |
+| User says "fastest encode" / "in a hurry" | Compress with `--concurrency 2 --override singleCodec=h264 --override av1Encoder=svt`. Skip alternate codecs unless the user explicitly asks for the bundle. |
+| User mentions a slow / shared / low-spec machine ("my laptop", "low CPU", "quiet fan") | Add `--concurrency 1` to whatever you were going to run. Keep the preset; just serialize. |
+| User says "open it" / "show me the preview" / "let me see" | Bash: ``open_cmd=$(command -v xdg-open || command -v open); "${open_cmd:-cmd}" /c start "<htmlPreviewPath>" 2>/dev/null \|\| "$open_cmd" "<htmlPreviewPath>"``. The first available of `xdg-open` (Linux), `open` (macOS), `cmd /c start` (Windows) wins. Use the path from the most recent `done` event. |
+| User re-asks for the same input with different settings ("now at 720p", "smaller please") | Recall the basename + preset from earlier in this Claude Code session. Reuse the preset and layer `--override` flags; skip re-running `vsc analyze` since the file hasn't changed. The CLI's per-phase cache still applies, so phases that don't change re-use their existing outputs. |
+
 When asking, present concrete options labeled with the preset ID and a one-line description so the user can decide quickly.
+
+### Concurrency notes
+
+Default is `--concurrency 2`, which roughly doubles throughput on multi-codec presets (h264+h265+AV1+VP9). The CLI caps the value at `os.cpus().length`, but disk I/O usually saturates somewhere around `cpus / 2`, so going higher rarely helps.
+
+Lower it (`--concurrency 1`) for: shared machines, laptops on battery, encoding while the user is on a video call, single-codec compresses (no parallelism opportunity anyway).
+
+Raise it (`--concurrency 4+`) only when the user has explicitly asked for max throughput on a workstation-class CPU and is OK with fan noise.
 
 ## Extending the system
 

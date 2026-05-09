@@ -65,6 +65,12 @@ export interface OutputSpec {
   speed?: string;
   /** Tag for compatibility (e.g. hvc1 for HEVC in Safari). */
   tag?: string;
+  /**
+   * Choose the AV1 encoder when `codec === "av1"`. `svt` is libsvtav1 (fast,
+   * default when available); `aom` is libaom-av1 (reference, slow). Ignored
+   * for non-AV1 codecs.
+   */
+  av1Encoder?: "svt" | "aom";
 }
 
 export interface PosterSpec {
@@ -100,6 +106,31 @@ export interface Preset {
   outputs: OutputSpec[];
   poster?: PosterSpec;
   gif?: GifSpec;
+}
+
+/**
+ * Per-call adjustments layered on top of a chosen preset. Lets the agent
+ * iterate on a preset without us shipping a new entry in `web.ts` for every
+ * variant ("compress at 720p", "drop audio", "h264 only").
+ *
+ * `singleCodec` filters `preset.outputs` to that codec only — orthogonal to
+ * the existing `--single` flag, which always picks the preset's primary
+ * output. Use `--override singleCodec=h264` when you want a one-codec bundle
+ * (still produces poster + HTML preview); use `--single` when you want the
+ * single-file no-extras shape.
+ */
+export interface PresetOverrides {
+  maxEdge?: number;
+  crf?: number;
+  bitrateKbps?: number;
+  dropAudio?: boolean;
+  singleCodec?: Codec;
+  /**
+   * Choose between the SVT-AV1 (fast) and libaom (reference) AV1 encoders.
+   * Only applies to AV1 outputs. Defaults to `svt` when SVT-AV1 is detected
+   * by `vsc doctor`, otherwise `aom`.
+   */
+  av1Encoder?: "svt" | "aom";
 }
 
 export interface VideoArtifact {
@@ -172,6 +203,14 @@ export type ProgressEvent =
       durationMs: number;
       htmlPreviewPath: string | null;
       oversizedCodecs: Codec[];
+      /**
+       * Number of phases satisfied from the on-disk cache (input mtime older
+       * than output mtime, no re-encode performed). Aggregated from each
+       * `phase-done.cached` boolean.
+       */
+      cachedPhases: number;
+      /** Number of phases that ran the encoder. */
+      encodedPhases: number;
     }
   | {
       type: "error";

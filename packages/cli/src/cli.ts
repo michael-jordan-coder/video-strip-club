@@ -5,12 +5,26 @@ import { compressCommand } from "./commands/compress.ts";
 import { batchCommand } from "./commands/batch.ts";
 import { doctorCommand } from "./commands/doctor.ts";
 import { presetsCommand } from "./commands/presets.ts";
+import { estimateCommand } from "./commands/estimate.ts";
 import { ENCODERS, PRESET_IDS } from "./types.ts";
 import type { Encoder, PresetId } from "./types.ts";
+import { parseOverrideArgs } from "./presets/web.ts";
 import { error } from "./lib/log.ts";
 import { CommandError } from "./lib/exec.ts";
 
 const STDERR_TAIL_LINES = 20;
+
+function collectOverride(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+function parsePositiveInt(value: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`Expected a positive integer, got '${value}'`);
+  }
+  return n;
+}
 
 // Set by `--json`-aware action handlers before they delegate. The top-level
 // catch reads this to decide whether to render a final error as a JSON line
@@ -54,6 +68,13 @@ program
   .option("--progress-file <path>", "tee NDJSON progress events to this file (works in either mode)")
   .option("--force", "re-encode every output even if an up-to-date version exists")
   .option("--single", "produce only the primary output (skip alternate codecs, posters, HTML preview); names the file <basename>.optimized.<ext>")
+  .option(
+    "--override <kv...>",
+    "preset override as key=value (repeatable). Keys: maxEdge, crf, bitrateKbps, dropAudio, singleCodec, av1Encoder",
+    collectOverride,
+    [],
+  )
+  .option("--concurrency <n>", "max phases to run in parallel (default 2; 1 = sequential)", parsePositiveInt)
   .action(async (input: string, opts: {
     preset: PresetId;
     outDir?: string;
@@ -63,8 +84,11 @@ program
     progressFile?: string;
     force?: boolean;
     single?: boolean;
+    override: string[];
+    concurrency?: number;
   }) => {
     jsonMode = opts.json === true;
+    const overrides = opts.override.length > 0 ? parseOverrideArgs(opts.override) : undefined;
     await compressCommand(input, {
       preset: opts.preset,
       outDir: opts.outDir,
@@ -74,6 +98,8 @@ program
       progressFile: opts.progressFile,
       force: opts.force === true,
       single: opts.single === true,
+      overrides,
+      concurrency: opts.concurrency,
     });
   });
 
@@ -106,10 +132,38 @@ program
   });
 
 program
+  .command("estimate <input>")
+  .description("Predict output sizes and encode duration for a preset without encoding.")
+  .addOption(presetOption())
+  .option(
+    "--override <kv...>",
+    "preset override as key=value (repeatable). Same grammar as compress.",
+    collectOverride,
+    [],
+  )
+  .option("--no-json", "render a human-readable table instead of JSON (JSON is default)")
+  .action(async (input: string, opts: {
+    preset: PresetId;
+    override: string[];
+    json?: boolean;
+  }) => {
+    const wantJson = opts.json !== false;
+    jsonMode = wantJson;
+    const overrides = opts.override.length > 0 ? parseOverrideArgs(opts.override) : undefined;
+    await estimateCommand(input, {
+      preset: opts.preset,
+      overrides,
+      json: wantJson,
+    });
+  });
+
+program
   .command("presets")
   .description("List available web delivery presets.")
-  .action(() => {
-    presetsCommand();
+  .option("--json", "emit a single JSON object describing every preset")
+  .action((opts: { json?: boolean }) => {
+    jsonMode = opts.json === true;
+    presetsCommand({ json: jsonMode });
   });
 
 program

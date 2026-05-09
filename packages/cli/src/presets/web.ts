@@ -1,4 +1,4 @@
-import type { Preset, PresetId } from "../types.ts";
+import type { Codec, OutputSpec, Preset, PresetId, PresetOverrides } from "../types.ts";
 import { PRESET_IDS } from "../types.ts";
 
 /**
@@ -209,4 +209,112 @@ export function isPresetId(s: string): s is PresetId {
 
 export function listPresetIds(): readonly PresetId[] {
   return PRESET_IDS;
+}
+
+/**
+ * Apply per-call overrides to a preset, returning a new `Preset` value (the
+ * original is not mutated). Cache keys remain stable for the matching
+ * configuration: changing `crf` or `maxEdge` produces a different file but
+ * the path is preset-derived, so the cached check still compares mtimes
+ * correctly. Callers should always run this *before* `buildPhases`.
+ */
+export function applyOverrides(preset: Preset, overrides: PresetOverrides): Preset {
+  if (isEmptyOverrides(overrides)) return preset;
+  const filteredOutputs = overrides.singleCodec
+    ? preset.outputs.filter((o) => o.codec === overrides.singleCodec)
+    : preset.outputs;
+  if (overrides.singleCodec && filteredOutputs.length === 0) {
+    throw new Error(
+      `Preset ${preset.id} has no output for codec ${overrides.singleCodec} — singleCodec override has nothing to encode.`,
+    );
+  }
+  const outputs = filteredOutputs.map((o) => applyOutputOverrides(o, overrides));
+  return { ...preset, outputs };
+}
+
+function applyOutputOverrides(out: OutputSpec, overrides: PresetOverrides): OutputSpec {
+  const next: OutputSpec = { ...out };
+  if (overrides.maxEdge != null) next.longestEdge = overrides.maxEdge;
+  if (overrides.crf != null) next.crf = overrides.crf;
+  if (overrides.bitrateKbps != null) next.bitrateKbps = overrides.bitrateKbps;
+  if (overrides.dropAudio != null) next.dropAudio = overrides.dropAudio;
+  if (overrides.av1Encoder && out.codec === "av1") next.av1Encoder = overrides.av1Encoder;
+  return next;
+}
+
+function isEmptyOverrides(o: PresetOverrides): boolean {
+  return (
+    o.maxEdge == null &&
+    o.crf == null &&
+    o.bitrateKbps == null &&
+    o.dropAudio == null &&
+    o.singleCodec == null &&
+    o.av1Encoder == null
+  );
+}
+
+const OVERRIDE_KEYS = [
+  "maxEdge",
+  "crf",
+  "bitrateKbps",
+  "dropAudio",
+  "singleCodec",
+  "av1Encoder",
+] as const;
+type OverrideKey = (typeof OVERRIDE_KEYS)[number];
+
+const VALID_CODECS: readonly Codec[] = ["h264", "h265", "av1", "vp9"];
+const VALID_AV1_ENCODERS = ["svt", "aom"] as const;
+
+/**
+ * Parse repeated `key=value` strings (from `--override key=value`) into a
+ * typed `PresetOverrides`. Throws on unknown keys or malformed values so the
+ * agent gets immediate feedback rather than silently mis-encoding.
+ */
+export function parseOverrideArgs(pairs: string[]): PresetOverrides {
+  const out: PresetOverrides = {};
+  for (const raw of pairs) {
+    const eq = raw.indexOf("=");
+    if (eq < 0) throw new Error(`Override must be key=value, got: ${raw}`);
+    const key = raw.slice(0, eq).trim();
+    const value = raw.slice(eq + 1).trim();
+    if (!isOverrideKey(key)) {
+      throw new Error(`Unknown override key '${key}'. Allowed: ${OVERRIDE_KEYS.join(", ")}`);
+    }
+    switch (key) {
+      case "maxEdge":
+      case "crf":
+      case "bitrateKbps": {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0) throw new Error(`Override ${key} must be a positive number, got '${value}'`);
+        out[key] = n;
+        break;
+      }
+      case "dropAudio": {
+        if (value === "true") out.dropAudio = true;
+        else if (value === "false") out.dropAudio = false;
+        else throw new Error(`Override dropAudio must be 'true' or 'false', got '${value}'`);
+        break;
+      }
+      case "singleCodec": {
+        if (!(VALID_CODECS as readonly string[]).includes(value)) {
+          throw new Error(`Override singleCodec must be one of ${VALID_CODECS.join(", ")}, got '${value}'`);
+        }
+        out.singleCodec = value as Codec;
+        break;
+      }
+      case "av1Encoder": {
+        if (!(VALID_AV1_ENCODERS as readonly string[]).includes(value)) {
+          throw new Error(`Override av1Encoder must be 'svt' or 'aom', got '${value}'`);
+        }
+        out.av1Encoder = value as "svt" | "aom";
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+function isOverrideKey(key: string): key is OverrideKey {
+  return (OVERRIDE_KEYS as readonly string[]).includes(key);
 }
