@@ -101,6 +101,20 @@ function buildVideoCodecArgs(spec: OutputSpec): string[] {
         "-tag:v", spec.tag ?? "hvc1",
       ];
     case "av1":
+      // Default to libsvtav1 (fast); fall back to libaom-av1 only when the
+      // caller explicitly asks for the reference encoder via the `aom` override.
+      // Both are bundled with ffmpeg builds we expect (`vsc doctor` checks
+      // ffmpeg, not the libraries individually).
+      if (spec.av1Encoder === "aom") {
+        return [
+          "-c:v", "libaom-av1",
+          // libaom cpu-used: 0 slowest, 8 fastest. 4 is a reasonable default.
+          "-cpu-used", spec.speed ?? "4",
+          "-crf", crf(32),
+          "-b:v", "0",
+          "-pix_fmt", "yuv420p",
+        ];
+      }
       return [
         "-c:v", "libsvtav1",
         // svt-av1 preset: 0 slowest/best quality, 13 fastest. 6 is a good web default.

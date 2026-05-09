@@ -1,9 +1,57 @@
+import { spawn } from "node:child_process";
+import { basename, resolve as resolvePath } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
 import { listVideos, formatBytes, formatDuration } from "./files.ts";
-import { findVscBin, probe, startEncode } from "./vsc.ts";
+import { probe, runVscJson, startEncode } from "./vsc.ts";
 import type { CompressedArtifact, PresetId, ProgressEvent } from "../types.ts";
+
+interface RecentEntry {
+  input: string;
+  preset: PresetId;
+  primaryOutputPath: string | null;
+  htmlPreviewPath: string | null;
+  artifacts: CompressedArtifact[];
+  cachedPhases: number;
+  encodedPhases: number;
+  durationMs: number;
+  completedAt: number;
+}
+
+const RECENT_LIMIT = 5;
+const recentCompressions = new Map<string, RecentEntry>();
+
+function rememberCompression(entry: RecentEntry): void {
+  const key = entry.input;
+  recentCompressions.delete(key);
+  recentCompressions.set(key, entry);
+  while (recentCompressions.size > RECENT_LIMIT) {
+    const oldest = recentCompressions.keys().next().value;
+    if (oldest === undefined) break;
+    recentCompressions.delete(oldest);
+  }
+}
+
+function recentDigest(): string {
+  if (recentCompressions.size === 0) return "";
+  const entries = Array.from(recentCompressions.values()).map((e) => ({
+    input: e.input,
+    basename: basename(e.input),
+    preset: e.preset,
+    primaryOutputPath: e.primaryOutputPath,
+    htmlPreviewPath: e.htmlPreviewPath,
+    cachedPhases: e.cachedPhases,
+    encodedPhases: e.encodedPhases,
+    durationMs: e.durationMs,
+  }));
+  return JSON.stringify(entries);
+}
+
+/** Exposed for tests / debugging only — the agent should not call this. */
+export function __resetRecentCompressionsForTests(): void {
+  recentCompressions.clear();
+}
 
 /**
  * The TUI subscribes to agent activity through this surface. Each tool's
@@ -34,12 +82,16 @@ const SYSTEM_PROMPT = `You are the video-strip-club encoding assistant — an in
 
 You are running inside a TUI on the user's machine. The cwd is the user's project root.
 
-You have four tools:
+You have these tools:
 
 - list_videos — find video files (.mp4, .mov, .mkv, .webm, .m4v, .avi). Always start here when the user references "this video" / "the video" / "my video" without naming a file.
 - analyze_video — probe a specific file. Returns duration, resolution, size, audio presence. Run before recommending a preset.
-- list_presets — get the four web delivery presets and their summaries. Reference them only by id once you've seen this list.
-- compress_video — encode the video to ONE optimized file written to the user's current directory. Streams progress to the UI and returns the output path on completion.
+- list_presets — get the available web delivery presets and their summaries (sourced from the CLI). Reference them only by id once you've seen this list.
+- estimate_compression — predict output size and encode duration without encoding. Run this before compress_video on inputs longer than 30s, or whenever the user asks "how big will it be?" / "how long will it take?".
+- compress_video — encode the video to ONE optimized file written to the user's current directory. Streams progress to the UI and returns the output path on completion. Accepts an optional \`overrides\` object to tweak the preset (resize, drop audio, single codec, AV1 encoder choice).
+- open_preview — open a previously-compressed file in the user's default viewer. Use this when the user asks "show me the result" / "open it" after a compression. Identify the artifact by \`path\` (returned by compress_video) or by \`basename\` (the input video's filename — looks up the matching entry from this session).
+
+You will receive a "Recent compressions in this session" message at the start of every turn after the first compression. Use it to answer follow-up requests ("compress that one again at 720p") without re-running list_videos.
 
 The output is one optimized file (no fallback codec bundle, no poster, no HTML preview). It is saved directly in the user's current directory and is **deleted automatically when the session ends** — so when reporting completion, tell the user to copy or rename the file if they want to keep it.
 
@@ -56,7 +108,8 @@ Decision rules for preset selection (apply in order):
 Style:
 - Be concise. This is a TUI — every line costs vertical space.
 - Announce your preset choice in one sentence ("Going with web-hero-cinematic — 12s clip with audio.") then encode.
-- After compress_video returns, surface the htmlPreviewPath so the user can open it.
+- After compress_video returns, tell the user the output path and remind them the file is ephemeral. Single-file mode does not produce an HTML preview, so don't promise one.
+- If cachedPhases > 0, mention it in one short clause ("3/4 reused from cache").
 - Don't run raw ffmpeg or speculate about encoder internals. The CLI owns encoding strategy.
 - If the user asks something off-topic, politely steer back to video encoding.
 
@@ -167,32 +220,36 @@ export function createTools({ cwd, subscriberRef }: ToolFactoryArgs) {
 
   const presetsTool = betaZodTool({
     name: "list_presets",
-    description: "List the four web delivery presets and what they're tuned for.",
+    description:
+      "List the available web delivery presets and what each one is tuned for. The list is sourced from `vsc presets --json` so it always matches the CLI.",
     inputSchema: z.object({}),
     run: async () => {
       const id = makeId();
       const sub = subscriberRef.current;
       sub?.onToolStart(id, "list_presets", {});
-      const presets = [
-        {
-          id: "web-hero-loop",
-          summary: "Muted autoplay loop, 1080p, no audio. h264 + h265 + AV1 + VP9 + poster.",
-        },
-        {
-          id: "web-hero-cinematic",
-          summary: "Brand cinematic with audio, 1080p, all four codecs + poster.",
-        },
-        {
-          id: "web-product-demo",
-          summary: "Longer-form demo at 720p with audio. h264 + h265 + VP9 + poster.",
-        },
-        {
-          id: "web-thumbnail-gif",
-          summary: "480px looping GIF + poster, 12fps, 4s. Email/thumbnail.",
-        },
-      ];
-      sub?.onToolEnd(id, "4 presets", false);
-      return JSON.stringify(presets);
+      try {
+        const data = await runVscJson<{
+          schemaVersion: number;
+          presets: Array<{
+            id: string;
+            title: string;
+            summary: string;
+            mutedAutoplay: boolean;
+            codecs: string[];
+            containers: string[];
+            hasGif: boolean;
+            hasPoster: boolean;
+            maxEdge: number | null;
+            audio: "preserved" | "dropped" | "mixed" | "n/a";
+          }>;
+        }>(["presets", "--json"]);
+        sub?.onToolEnd(id, `${data.presets.length} presets`, false);
+        return JSON.stringify(data.presets);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        sub?.onToolEnd(id, message, true);
+        throw err;
+      }
     },
   });
 
@@ -203,37 +260,139 @@ export function createTools({ cwd, subscriberRef }: ToolFactoryArgs) {
     "web-thumbnail-gif",
   ]);
 
+  const estimateOverridesSchema = z
+    .object({
+      maxEdge: z.number().int().positive().optional(),
+      crf: z.number().positive().optional(),
+      bitrateKbps: z.number().positive().optional(),
+      dropAudio: z.boolean().optional(),
+      singleCodec: z.enum(["h264", "h265", "av1", "vp9"]).optional(),
+      av1Encoder: z.enum(["svt", "aom"]).optional(),
+    })
+    .optional();
+
+  const estimateTool = betaZodTool({
+    name: "estimate_compression",
+    description:
+      "Predict output sizes and encode duration for a preset without actually encoding. Use this before `compress_video` on long inputs (>30s) so the user can confirm scope before committing to the encode. Calls `vsc estimate --json`.",
+    inputSchema: z.object({
+      path: z.string().describe("Absolute or cwd-relative path to the video file."),
+      preset: presetSchema.describe("Preset id to estimate."),
+      overrides: estimateOverridesSchema,
+    }),
+    run: async (input) => {
+      const id = makeId();
+      const sub = subscriberRef.current;
+      sub?.onToolStart(id, "estimate_compression", input);
+      try {
+        const args = ["estimate", input.path, "--preset", input.preset];
+        if (input.overrides) {
+          for (const [k, v] of Object.entries(input.overrides)) {
+            if (v == null) continue;
+            args.push("--override", `${k}=${String(v)}`);
+          }
+        }
+        const data = await runVscJson<{
+          schemaVersion: number;
+          input: string;
+          preset: string;
+          durationSec: number;
+          inputSizeBytes: number;
+          totalBytes: number;
+          totalSeconds: number;
+          phases: Array<{
+            name: string;
+            kind: string;
+            estimatedSizeBytes: number;
+            estimatedSeconds: number;
+            encoder: string;
+          }>;
+        }>(args);
+        const summary = `~${formatBytes(data.totalBytes)} total · ~${Math.round(data.totalSeconds)}s encode (${data.phases.length} phases)`;
+        sub?.onToolEnd(id, summary, false);
+        return JSON.stringify(data);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        sub?.onToolEnd(id, message, true);
+        throw err;
+      }
+    },
+  });
+
+  const overridesSchema = z
+    .object({
+      maxEdge: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Resize the longer edge to this many pixels (keeps aspect)."),
+      crf: z.number().positive().optional().describe("CRF/quality. Lower is better; encoder-specific scale."),
+      bitrateKbps: z.number().positive().optional().describe("Target bitrate in kbps."),
+      dropAudio: z.boolean().optional().describe("Drop audio entirely."),
+      singleCodec: z
+        .enum(["h264", "h265", "av1", "vp9"])
+        .optional()
+        .describe("Filter the preset's outputs to just this codec."),
+      av1Encoder: z
+        .enum(["svt", "aom"])
+        .optional()
+        .describe("Choose the AV1 encoder. 'svt' is much faster than 'aom'."),
+    })
+    .optional();
+
   const compressTool = betaZodTool({
     name: "compress_video",
     description:
-      "Encode a video to ONE optimized file using a preset. The file is written into the user's current directory as <basename>.optimized.<ext> and will be deleted when this TUI session ends — tell the user to copy or rename it if they want to keep it. Streams progress events live to the UI.",
+      "Encode a video to ONE optimized file using a preset. The file is written into the user's current directory as <basename>.optimized.<ext> and will be deleted when this TUI session ends — tell the user to copy or rename it if they want to keep it. Streams progress events live to the UI. Use `overrides` to adjust the preset (e.g. lower resolution, drop audio, pick a single codec) without switching presets.",
     inputSchema: z.object({
       path: z.string().describe("Absolute or cwd-relative path to the video file."),
       preset: presetSchema.describe("Preset id to use."),
+      overrides: overridesSchema,
     }),
     run: async (input) => {
       const id = makeId();
       const sub = subscriberRef.current;
       sub?.onToolStart(id, "compress_video", input);
       return new Promise<string>((resolve, reject) => {
+        const overrides = input.overrides ?? {};
         startEncode(
           input.path,
           input.preset as PresetId,
-          { outDir: cwd, single: true },
+          { outDir: cwd, single: true, overrides },
           (event) => {
             sub?.onToolProgress(id, event);
             if (event.type === "done") {
               const primary = event.artifacts[0];
               if (primary) sub?.onOutputCreated(primary.path);
+              const total = event.cachedPhases + event.encodedPhases;
+              const cacheNote =
+                event.cachedPhases > 0 && total > 0
+                  ? ` · ${event.cachedPhases}/${total} reused from cache`
+                  : "";
               const summary = primary
-                ? `done in ${Math.round(event.durationMs / 100) / 10}s · ${formatArtifact(primary)} → ${primary.path}`
-                : `done in ${Math.round(event.durationMs / 100) / 10}s`;
+                ? `done in ${Math.round(event.durationMs / 100) / 10}s · ${formatArtifact(primary)} → ${primary.path}${cacheNote}`
+                : `done in ${Math.round(event.durationMs / 100) / 10}s${cacheNote}`;
               sub?.onToolEnd(id, summary, false);
+              rememberCompression({
+                input: resolvePath(input.path),
+                preset: input.preset as PresetId,
+                primaryOutputPath: primary?.path ?? null,
+                htmlPreviewPath: event.htmlPreviewPath,
+                artifacts: event.artifacts,
+                cachedPhases: event.cachedPhases,
+                encodedPhases: event.encodedPhases,
+                durationMs: event.durationMs,
+                completedAt: Date.now(),
+              });
               resolve(
                 JSON.stringify({
                   outputPath: primary?.path ?? null,
                   sizeBytes: primary?.sizeBytes ?? null,
                   durationMs: event.durationMs,
+                  htmlPreviewPath: event.htmlPreviewPath,
+                  cachedPhases: event.cachedPhases,
+                  encodedPhases: event.encodedPhases,
                   oversizedCodecs: event.oversizedCodecs,
                   ephemeralReminder:
                     "This file will be deleted when the TUI session ends. The user should copy or rename it if they want to keep it.",
@@ -254,7 +413,68 @@ export function createTools({ cwd, subscriberRef }: ToolFactoryArgs) {
     },
   });
 
-  return [listTool, analyzeTool, presetsTool, compressTool];
+  const openPreviewTool = betaZodTool({
+    name: "open_preview",
+    description:
+      "Open a previously-compressed output (or its HTML preview if available) in the user's default viewer. Use after a compress_video call when the user asks to see the result. Identify the artifact by `path` (an absolute path that compress_video returned) or by `basename` (the input video's basename — looks up the most recent matching compression in this session).",
+    inputSchema: z.object({
+      path: z.string().optional().describe("Absolute path to the file to open."),
+      basename: z
+        .string()
+        .optional()
+        .describe(
+          "Basename of the input video (e.g. 'hero.mp4'). Looks up the most recent compression for that input.",
+        ),
+    }),
+    run: async (input) => {
+      const id = makeId();
+      const sub = subscriberRef.current;
+      sub?.onToolStart(id, "open_preview", input);
+      const target = resolveOpenTarget(input);
+      if (!target) {
+        const message =
+          "No matching compression. Provide an explicit `path`, or pass the basename of an input that was compressed in this session.";
+        sub?.onToolEnd(id, message, true);
+        throw new Error(message);
+      }
+      try {
+        await openPath(target);
+        sub?.onToolEnd(id, `opened ${target}`, false);
+        return JSON.stringify({ opened: true, path: target });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        sub?.onToolEnd(id, message, true);
+        throw err;
+      }
+    },
+  });
+
+  return [listTool, analyzeTool, presetsTool, estimateTool, compressTool, openPreviewTool];
+}
+
+function resolveOpenTarget(input: { path?: string | undefined; basename?: string | undefined }): string | null {
+  if (input.path) return input.path;
+  if (input.basename) {
+    const wanted = input.basename;
+    const entries = Array.from(recentCompressions.values()).reverse();
+    const match = entries.find((e) => basename(e.input) === wanted);
+    if (match) return match.htmlPreviewPath ?? match.primaryOutputPath;
+  }
+  return null;
+}
+
+function openPath(path: string): Promise<void> {
+  const command =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", path] : [path];
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { detached: true, stdio: "ignore" });
+    child.on("error", reject);
+    child.on("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
 }
 
 export interface RunTurnArgs {
@@ -287,7 +507,25 @@ export async function runTurn({
   const subscriberRef: { current: AgentSubscriber | null } = { current: subscriber };
   const tools = createTools({ cwd, subscriberRef });
 
+  // Inject a separate "recent work" user-role turn so the model can refer to
+  // prior compressions ("compress that one again at 720p") without re-running
+  // list_videos. Kept out of SYSTEM_PROMPT so the cache prefix stays stable.
+  const recentDigestStr = recentDigest();
+  const recentTurns = recentDigestStr
+    ? [
+        {
+          role: "user" as const,
+          content: `Recent compressions in this session (most recent last):\n${recentDigestStr}`,
+        },
+        {
+          role: "assistant" as const,
+          content: "Acknowledged — I'll reference these by basename if you ask about them again.",
+        },
+      ]
+    : [];
+
   const messages = [
+    ...recentTurns,
     ...history.map((h) => ({ role: h.role, content: h.content })),
     { role: "user" as const, content: userInput },
   ];

@@ -17,10 +17,24 @@ Key commands (all support `--json` for machine-readable output):
 
 - `./node_modules/.bin/vsc analyze <file> --json` → one JSON object: `{ format: { durationSec, sizeBytes, ... }, video: { codecName, width, height, ... }, audios: [...] }`. Use this to drive preset selection.
 - `./node_modules/.bin/vsc compress <file> --preset <id> --json` → NDJSON event stream (one event per line). Run this in the background and Monitor the task ID — see "Workflow" below.
-- `./node_modules/.bin/vsc presets` → list available presets.
+- `./node_modules/.bin/vsc estimate <file> --preset <id>` → one JSON object: `{schemaVersion, input, durationSec, totalBytes, totalSeconds, phases: [{name, kind, estimatedSizeBytes, estimatedSeconds, encoder}, ...]}`. Use this for **pre-flight estimation** on any input longer than ~30s before committing to the encode — surface "≈X MB across N phases, ~Y seconds" so the user can confirm scope. Accepts the same `--override` flags as `compress`.
+- `./node_modules/.bin/vsc presets --json` → one JSON object: `{schemaVersion, presets: [{id, title, summary, codecs, containers, hasGif, hasPoster, maxEdge, audio}]}`. **This is the source of truth for available presets.** Don't hardcode the preset list — call this command.
 - `./node_modules/.bin/vsc doctor` → check that ffmpeg / ffprobe / HandBrake / gifski / svt-av1 are installed.
 
-Useful flags: `--out-dir <dir>` (default `./out/<basename>/`), `--force` (re-encode even when up-to-date), `--progress-file <path>` (tee NDJSON events to a file).
+Useful flags: `--out-dir <dir>` (default `./out/<basename>/`), `--force` (re-encode even when up-to-date), `--progress-file <path>` (tee NDJSON events to a file), `--concurrency <n>` (run up to N video phases in parallel; default 2), `--override <key=value>` (per-call preset adjustments — repeatable).
+
+### Override grammar
+
+`--override key=value` lets you tweak a preset for one run without editing `web.ts`. Repeat the flag for multiple keys. Allowed keys:
+
+- `maxEdge=720` — resize longest edge in pixels.
+- `crf=24` — quality knob; lower is better. Encoder-specific scale.
+- `bitrateKbps=1500` — target mean bitrate.
+- `dropAudio=true|false` — force-drop or force-keep audio.
+- `singleCodec=h264|h265|av1|vp9` — filter the preset's outputs to one codec (still produces poster + HTML preview; orthogonal to `--single`).
+- `av1Encoder=svt|aom` — pick the AV1 encoder. `svt` (libsvtav1) is roughly 8–10× faster than `aom` (libaom-av1); default is `svt` when the binary is detected by `vsc doctor`.
+
+Example: `vsc compress hero.mp4 --preset web-hero-cinematic --override maxEdge=720 --override singleCodec=h264`.
 
 The four built-in presets:
 
@@ -101,6 +115,7 @@ After receiving `done`:
 
 ```
 Compressed {artifacts.length} artifact{s} in {durationMs formatted}.
+{if cachedPhases > 0: "{cachedPhases}/{cachedPhases+encodedPhases} reused from cache."}
 Preview: open {htmlPreviewPath}
 
   • {codec/container} · {sizeBytes formatted} · {relative path}
@@ -108,6 +123,8 @@ Preview: open {htmlPreviewPath}
 
 Copy the files to your project's public assets folder (e.g. public/videos/) when ready to ship.
 ```
+
+If `cachedPhases === phases.length`, surface "Everything was already up to date — nothing re-encoded." instead of the timing line.
 
 If `oversizedCodecs` is non-empty, append:
 

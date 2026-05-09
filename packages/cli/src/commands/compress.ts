@@ -1,4 +1,5 @@
 import { mkdir, stat } from "node:fs/promises";
+import { cpus } from "node:os";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { probe } from "../lib/probe.ts";
 import { checkDeps, makeHas } from "../lib/deps.ts";
@@ -7,7 +8,7 @@ import { CommandError } from "../lib/exec.ts";
 import { encodeVideo, extractPoster, buildGifWithPalette } from "../encoders/ffmpeg.ts";
 import { buildGifWithGifski } from "../encoders/gifski.ts";
 import { encodeWithHandbrake } from "../encoders/handbrake.ts";
-import { getPreset } from "../presets/web.ts";
+import { applyOverrides, getPreset } from "../presets/web.ts";
 import { c, formatBytes } from "../lib/log.ts";
 import { JsonReporter, PrettyReporter, fileTap } from "../lib/reporter.ts";
 import type { Reporter } from "../lib/reporter.ts";
@@ -23,6 +24,7 @@ import type {
   PosterSpec,
   Preset,
   PresetId,
+  PresetOverrides,
   ProbeResult,
   ProgressEvent,
   VideoArtifact,
@@ -51,6 +53,18 @@ export interface CompressOptions {
    * named `<basename>.optimized.<ext>` to make intent obvious to consumers.
    */
   single?: boolean | undefined;
+  /**
+   * Per-call adjustments to the preset (resize, codec filter, audio drop,
+   * AV1 encoder pick). Applied before phases are built so cache lookups
+   * remain correct.
+   */
+  overrides?: PresetOverrides | undefined;
+  /**
+   * Maximum number of phases to run concurrently. `1` preserves the original
+   * sequential behavior. Defaults to `2`. Capped internally at
+   * `os.cpus().length` to avoid oversubscription.
+   */
+  concurrency?: number | undefined;
 }
 
 interface VideoPhase {
@@ -84,7 +98,8 @@ export async function compressCommand(
   options: CompressOptions,
 ): Promise<CompressResult> {
   const inputAbs = resolve(input);
-  const preset = getPreset(options.preset);
+  const basePreset = getPreset(options.preset);
+  const preset = options.overrides ? applyOverrides(basePreset, options.overrides) : basePreset;
   const probed = await probe(inputAbs);
   const inputStat = await stat(inputAbs);
   const baseName = basename(inputAbs, extname(inputAbs));
@@ -123,46 +138,85 @@ export async function compressCommand(
     ),
   });
 
-  const artifacts: CompressedArtifact[] = [];
-  let phasesDone = 0;
+  const artifactSlots: Array<CompressedArtifact | null> = phases.map(() => null);
+  const counters: SharedCounters = { phasesDone: 0, total: phases.length };
+  let cachedPhases = 0;
+  let encodedPhases = 0;
+  const concurrencyCap = Math.max(1, cpus().length);
+  const concurrency = Math.max(1, Math.min(options.concurrency ?? 2, concurrencyCap));
 
-  for (const phase of phases) {
-    try {
-      const artifact = await runPhase({
-        phase,
-        input: inputAbs,
-        probed,
-        inputMtimeMs: inputStat.mtimeMs,
-        force,
-        encoderChoice,
-        has,
-        reporter,
-        phasesDone,
-        phasesTotal: phases.length,
-      });
-      artifacts.push(artifact);
-      phasesDone += 1;
+  const errors: { err: unknown; phase: PhaseInfo }[] = [];
+  let bail = false;
 
-      if (artifact.kind === "video" && artifact.sizeBytes > probed.format.sizeBytes) {
-        reporter.emit({
-          type: "warning",
-          message: `${artifact.codec}/${artifact.container} (${formatBytes(artifact.sizeBytes)}) is larger than the input (${formatBytes(probed.format.sizeBytes)}).`,
-          codec: artifact.codec,
-        });
-      }
-    } catch (err) {
-      const errorEvent: Extract<ProgressEvent, { type: "error" }> = {
-        type: "error",
-        phase: phase.name,
-        message: err instanceof Error ? err.message : String(err),
-        stderrTail: err instanceof CommandError ? err.stderrTail(STDERR_TAIL_LINES) : "",
-      };
-      if (phase.kind === "video") errorEvent.codec = phase.codec;
-      reporter.emit(errorEvent);
-      await reporter.close();
-      throw err;
-    }
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, phases.length);
+  const lanes: Promise<void>[] = [];
+  for (let lane = 0; lane < workerCount; lane++) {
+    lanes.push(
+      (async () => {
+        while (!bail) {
+          const idx = nextIndex++;
+          if (idx >= phases.length) return;
+          const phase = phases[idx];
+          if (!phase) return;
+          try {
+            const result = await runPhase({
+              phase,
+              input: inputAbs,
+              probed,
+              inputMtimeMs: inputStat.mtimeMs,
+              force,
+              encoderChoice,
+              has,
+              reporter,
+              counters,
+            });
+            artifactSlots[idx] = result.artifact;
+            if (result.cached) cachedPhases += 1;
+            else encodedPhases += 1;
+            counters.phasesDone += 1;
+
+            if (
+              result.artifact.kind === "video" &&
+              result.artifact.sizeBytes > probed.format.sizeBytes
+            ) {
+              reporter.emit({
+                type: "warning",
+                message: `${result.artifact.codec}/${result.artifact.container} (${formatBytes(result.artifact.sizeBytes)}) is larger than the input (${formatBytes(probed.format.sizeBytes)}).`,
+                codec: result.artifact.codec,
+              });
+            }
+          } catch (err) {
+            bail = true;
+            errors.push({ err, phase });
+            return;
+          }
+        }
+      })(),
+    );
   }
+
+  await Promise.all(lanes);
+
+  if (errors.length > 0) {
+    const first = errors[0];
+    if (!first) throw new Error("phase failed without recording an error"); // unreachable
+    const { err, phase } = first;
+    const errorEvent: Extract<ProgressEvent, { type: "error" }> = {
+      type: "error",
+      phase: phase.name,
+      message: err instanceof Error ? err.message : String(err),
+      stderrTail: err instanceof CommandError ? err.stderrTail(STDERR_TAIL_LINES) : "",
+    };
+    if (phase.kind === "video") errorEvent.codec = phase.codec;
+    reporter.emit(errorEvent);
+    await reporter.close();
+    throw err;
+  }
+
+  const artifacts: CompressedArtifact[] = artifactSlots.filter(
+    (a): a is CompressedArtifact => a != null,
+  );
 
   let htmlPreviewPath: string | null = null;
   if (artifacts.length > 0 && !single) {
@@ -185,6 +239,8 @@ export async function compressCommand(
     durationMs: Date.now() - startedAt,
     htmlPreviewPath,
     oversizedCodecs,
+    cachedPhases,
+    encodedPhases,
   });
 
   if (!jsonMode && !options.reporter) {
@@ -277,6 +333,11 @@ function buildSinglePhase(preset: Preset, baseName: string, outDir: string): Pha
   throw new Error(`Preset ${preset.id} has no primary output to encode`);
 }
 
+interface SharedCounters {
+  phasesDone: number;
+  total: number;
+}
+
 interface RunPhaseArgs {
   phase: PhaseInfo;
   input: string;
@@ -286,11 +347,15 @@ interface RunPhaseArgs {
   encoderChoice: Encoder;
   has: HasDep;
   reporter: Reporter;
-  phasesDone: number;
-  phasesTotal: number;
+  counters: SharedCounters;
 }
 
-async function runPhase(args: RunPhaseArgs): Promise<CompressedArtifact> {
+interface RunPhaseResult {
+  artifact: CompressedArtifact;
+  cached: boolean;
+}
+
+async function runPhase(args: RunPhaseArgs): Promise<RunPhaseResult> {
   const { phase, input, probed, inputMtimeMs, force, encoderChoice, has, reporter } = args;
 
   if (!force) {
@@ -303,7 +368,7 @@ async function runPhase(args: RunPhaseArgs): Promise<CompressedArtifact> {
         path: phase.outPath,
         cached: true,
       });
-      return artifactFromPhase(phase, cached.size);
+      return { artifact: artifactFromPhase(phase, cached.size), cached: true };
     }
   }
 
@@ -329,11 +394,11 @@ async function runPhase(args: RunPhaseArgs): Promise<CompressedArtifact> {
     path: phase.outPath,
     cached: false,
   });
-  return artifactFromPhase(phase, s.size);
+  return { artifact: artifactFromPhase(phase, s.size), cached: false };
 }
 
 async function runVideo(phase: VideoPhase, args: RunPhaseArgs): Promise<void> {
-  const { input, probed, encoderChoice, has, reporter } = args;
+  const { input, probed, encoderChoice, has, reporter, counters } = args;
   const totalSec = probed.format.durationSec;
   const resolved = resolveEncoder(encoderChoice, phase.codec, has);
 
@@ -351,16 +416,21 @@ async function runVideo(phase: VideoPhase, args: RunPhaseArgs): Promise<void> {
     probe: probed,
     onProgress: (p) => {
       const pct = totalSec > 0 ? Math.min(100, Math.round((p.outSec / totalSec) * 100)) : 0;
+      // Overall percentage is computed from the live shared counter so
+      // parallel phases don't all report a stale snapshot from when their
+      // phase started.
       const overallPct =
-        Math.round(((args.phasesDone + pct / 100) / args.phasesTotal) * 100);
+        counters.total > 0
+          ? Math.round(((counters.phasesDone + pct / 100) / counters.total) * 100)
+          : 0;
       reporter.emit({
         type: "progress",
         phase: phase.name,
         currentPct: pct,
         speedX: p.speed,
         overall: {
-          phasesDone: args.phasesDone,
-          phasesTotal: args.phasesTotal,
+          phasesDone: counters.phasesDone,
+          phasesTotal: counters.total,
           pct: overallPct,
         },
       });

@@ -51,9 +51,20 @@ export interface EncodeHandle {
  * `error` event already emitted). On normal completion neither callback is
  * called after the `done` event — the consumer cleans up there.
  */
+export interface CompressOverrides {
+  maxEdge?: number | undefined;
+  crf?: number | undefined;
+  bitrateKbps?: number | undefined;
+  dropAudio?: boolean | undefined;
+  singleCodec?: "h264" | "h265" | "av1" | "vp9" | undefined;
+  av1Encoder?: "svt" | "aom" | undefined;
+}
+
 export interface StartEncodeOptions {
   outDir: string;
-  single?: boolean;
+  single?: boolean | undefined;
+  overrides?: CompressOverrides | undefined;
+  concurrency?: number | undefined;
 }
 
 export function startEncode(
@@ -74,6 +85,13 @@ export function startEncode(
     "--json",
   ];
   if (options.single ?? true) args.push("--single");
+  if (options.concurrency != null) args.push("--concurrency", String(options.concurrency));
+  if (options.overrides) {
+    for (const [k, v] of Object.entries(options.overrides)) {
+      if (v == null) continue;
+      args.push("--override", `${k}=${String(v)}`);
+    }
+  }
   const child = spawn(bin, args, {
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -119,6 +137,17 @@ export function startEncode(
       if (!child.killed) child.kill("SIGINT");
     },
   };
+}
+
+/**
+ * Run `vsc <args>` and parse its stdout as a single JSON object. Used for
+ * `vsc presets --json` and `vsc estimate ... --json` — anything that returns
+ * structured output rather than an NDJSON stream.
+ */
+export async function runVscJson<T>(args: string[]): Promise<T> {
+  const bin = findVscBin();
+  const out = await runCapture(bin, args);
+  return JSON.parse(out) as T;
 }
 
 function runCapture(bin: string, args: string[]): Promise<string> {
