@@ -2,24 +2,41 @@ import { Box, Text } from "ink";
 import { theme } from "./theme.ts";
 
 /**
- * Pink slime mascot — single static frame rendered as a permanent banner at
- * the top of the TUI. Three color layers (body / eyes / sparkles) are
- * applied at the segment level by walking each line and grouping runs of
- * same-colored characters, so the silhouette reads cleanly without
- * per-character Text nodes.
+ * Pink mascot — pixel-art trace of the welcome logo. Lounging pose with
+ * arms extended forward (left) and both legs bent up forming an M-shape.
+ * The single black eye sits near the front of the head.
+ *
+ * Two color layers (body / eye) are applied at the segment level by
+ * walking each line and grouping runs of same-colored characters, so the
+ * silhouette reads cleanly without per-character Text nodes.
  */
 const FRAME: readonly string[] = [
-  "     ▄▄▄▄▄▄▄▄▄▄▄     ",
-  "   ▄███████████████▄   ",
-  "  █████  ●   ●  █████  ",
-  "  █████    ‿    █████  ",
-  "   ▀███████████████▀   ",
-  "     ▀▀▀▀▀▀▀▀▀▀▀     ",
-  "       ⋆  ⋆  ⋆       ",
+  "                ▄▄▄▄▄▄▄▄                            ",
+  "             ▄██████████████▄                       ",
+  "            ████████████████                        ",
+  "           ████████████ ●███                        ",
+  "           ██████████████████                       ",
+  "          ████████████████                          ",
+  "         ███████████████                            ",
+  "       ▄████████████████                            ",
+  "     ▄██████████████████                            ",
+  "   ▄████████████████████                            ",
+  "  ████████████████████                              ",
+  "  ████   ████      ████                             ",
+  "  ███     █                                         ",
+  "                                                    ",
+  "                  ▄▄▄                ▄▄             ",
+  "               ▄███████           ▄██████▄          ",
+  "              █████████          ████████████       ",
+  "            █████   █████       ████      ████      ",
+  "          █████      ██████    ████        █████    ",
+  "        █████          █████   ████          █████  ",
+  "      █████              █████████             █████",
+  "   ████████              ████████              █████",
+  "█████████████          ████                    █████",
 ];
 
-const EYE_CHARS = new Set(["●", "‿"]);
-const SPARKLE_CHARS = new Set(["⋆"]);
+const EYE_CHARS = new Set(["●"]);
 
 export function Mascot(): JSX.Element {
   return (
@@ -36,13 +53,11 @@ function Line({ text }: { text: string }): JSX.Element {
   let buf = "";
   let currentColor = "";
   for (const ch of text) {
-    const color = SPARKLE_CHARS.has(ch)
+    const color = EYE_CHARS.has(ch)
       ? theme.muted
-      : EYE_CHARS.has(ch)
-        ? theme.cyan
-        : ch === " "
-          ? "transparent"
-          : theme.pink;
+      : ch === " "
+        ? "transparent"
+        : theme.pink;
     if (color !== currentColor) {
       if (buf) segments.push({ chars: buf, color: currentColor });
       buf = ch;
