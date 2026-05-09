@@ -154,7 +154,9 @@ When you receive an `error` event:
 
 ## Decision tree
 
-Apply in order; first match wins:
+Apply in order; first match wins. The preset table picks **what** to encode; the action table that follows picks **how** to invoke it.
+
+### Preset selection
 
 | Signal                                                                | Preset                |
 |-----------------------------------------------------------------------|-----------------------|
@@ -167,7 +169,28 @@ Apply in order; first match wins:
 | Duration 15–30s **with** audio                                        | **ask** (AskUserQuestion: hero-cinematic vs product-demo) |
 | Anything else genuinely ambiguous                                     | **ask** what you need |
 
+### Action / override selection
+
+Match the user's secondary intent **after** picking a preset. These rows compose with each other (e.g. "smallest possible **and** my laptop is slow" stacks the overrides).
+
+| Signal | Action |
+|---|---|
+| User asks "how big?" / "how long?" / "will it fit X?" | Run `vsc estimate <file> --preset <id>` first; surface `~X MB across N phases, ~Y seconds`. Wait for confirmation before encoding. |
+| User says "smallest possible" / "the smallest" | Estimate with `--override singleCodec=av1 --override av1Encoder=svt` first. If estimated time is too long for the user's patience, fall back to `--override singleCodec=h265`. Then compress with the same overrides. |
+| User says "fastest encode" / "in a hurry" | Compress with `--concurrency 2 --override singleCodec=h264 --override av1Encoder=svt`. Skip alternate codecs unless the user explicitly asks for the bundle. |
+| User mentions a slow / shared / low-spec machine ("my laptop", "low CPU", "quiet fan") | Add `--concurrency 1` to whatever you were going to run. Keep the preset; just serialize. |
+| User says "open it" / "show me the preview" / "let me see" | Bash: ``open_cmd=$(command -v xdg-open || command -v open); "${open_cmd:-cmd}" /c start "<htmlPreviewPath>" 2>/dev/null \|\| "$open_cmd" "<htmlPreviewPath>"``. The first available of `xdg-open` (Linux), `open` (macOS), `cmd /c start` (Windows) wins. Use the path from the most recent `done` event. |
+| User re-asks for the same input with different settings ("now at 720p", "smaller please") | Recall the basename + preset from earlier in this Claude Code session. Reuse the preset and layer `--override` flags; skip re-running `vsc analyze` since the file hasn't changed. The CLI's per-phase cache still applies, so phases that don't change re-use their existing outputs. |
+
 When asking, present concrete options labeled with the preset ID and a one-line description so the user can decide quickly.
+
+### Concurrency notes
+
+Default is `--concurrency 2`, which roughly doubles throughput on multi-codec presets (h264+h265+AV1+VP9). The CLI caps the value at `os.cpus().length`, but disk I/O usually saturates somewhere around `cpus / 2`, so going higher rarely helps.
+
+Lower it (`--concurrency 1`) for: shared machines, laptops on battery, encoding while the user is on a video call, single-codec compresses (no parallelism opportunity anyway).
+
+Raise it (`--concurrency 4+`) only when the user has explicitly asked for max throughput on a workstation-class CPU and is OK with fan noise.
 
 ## Extending the system
 

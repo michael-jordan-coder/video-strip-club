@@ -1,12 +1,14 @@
 import { unlinkSync } from "node:fs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import { theme, symbols } from "./theme.ts";
 import { formatBytes } from "./lib/files.ts";
 import { createClient, runTurn } from "./lib/agent.ts";
 import type { AgentSubscriber } from "./lib/agent.ts";
+import { parseSlash, runSlash } from "./lib/slash.ts";
+import type { PickerOption } from "./lib/slash.ts";
 import type { ProgressEvent } from "./types.ts";
 import { Mascot } from "./Mascot.tsx";
 
@@ -39,7 +41,17 @@ interface SystemItem {
   tone: "info" | "error";
 }
 
-type ChatItem = UserItem | AssistantItem | ToolItem | SystemItem;
+interface SlashItem {
+  kind: "slash";
+  id: string;
+  card: string;
+  status: "ok" | "error";
+  summary: string;
+  details?: string[];
+  picker?: { kind: "files" | "presets"; options: PickerOption[] };
+}
+
+type ChatItem = UserItem | AssistantItem | ToolItem | SystemItem | SlashItem;
 
 const INPUT_PLACEHOLDER = "ask anything · e.g. compress hero.mp4 for the landing page";
 
@@ -79,8 +91,11 @@ function ApiKeyMissing(): JSX.Element {
   );
 }
 
+const INPUT_HISTORY_CAP = 100;
+
 function Chat({ cwd }: { cwd: string }): JSX.Element {
   const { exit } = useApp();
+  const { stdout } = useStdout();
   const client = useMemo(() => createClient(), []);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [input, setInput] = useState("");
@@ -88,6 +103,9 @@ function Chat({ cwd }: { cwd: string }): JSX.Element {
   const [history, setHistory] = useState<Array<{ role: "user" | "assistant"; content: string }>>(
     [],
   );
+  const [inputHistory, setInputHistory] = useState<string[]>([]);
+  const [historyCursor, setHistoryCursor] = useState<number | null>(null);
+  const [scrollOffset, setScrollOffset] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const itemIdRef = useRef(0);
   const outputsRef = useRef<Set<string>>(new Set());
@@ -95,6 +113,14 @@ function Chat({ cwd }: { cwd: string }): JSX.Element {
   const nextId = useCallback(() => {
     itemIdRef.current += 1;
     return `i${itemIdRef.current}`;
+  }, []);
+
+  const pushInputHistory = useCallback((text: string) => {
+    setInputHistory((prev) => {
+      const next = prev.length > 0 && prev[prev.length - 1] === text ? prev : [...prev, text];
+      return next.length > INPUT_HISTORY_CAP ? next.slice(next.length - INPUT_HISTORY_CAP) : next;
+    });
+    setHistoryCursor(null);
   }, []);
 
   // Outputs are intentionally ephemeral — sweep them on any path that ends
@@ -119,9 +145,76 @@ function Chat({ cwd }: { cwd: string }): JSX.Element {
     };
   }, []);
 
+  const activePicker = useMemo<SlashItem | null>(() => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (!it) continue;
+      if (it.kind === "slash" && it.picker) return it;
+      // Anything other than a slash item invalidates the picker (the user
+      // moved on conversationally or another slash command landed).
+      if (it.kind !== "slash") break;
+    }
+    return null;
+  }, [items]);
+
   useInput((inputChar, key) => {
-    if (key.escape && busy && abortRef.current) {
-      abortRef.current.abort();
+    if (key.escape) {
+      if (busy && abortRef.current) abortRef.current.abort();
+      else if (activePicker) {
+        // Dismiss the picker by pushing a no-op system note so it stops
+        // matching activePicker's "most-recent" check.
+        setItems((prev) => [
+          ...prev,
+          { kind: "system", id: nextId(), text: "picker dismissed", tone: "info" },
+        ]);
+      } else if (scrollOffset > 0) {
+        setScrollOffset(0);
+      }
+      return;
+    }
+    if (key.pageUp) {
+      const half = Math.max(2, Math.floor(viewportRows / 2));
+      setScrollOffset((prev) => prev + half);
+      return;
+    }
+    if (key.pageDown) {
+      const half = Math.max(2, Math.floor(viewportRows / 2));
+      setScrollOffset((prev) => Math.max(0, prev - half));
+      return;
+    }
+    if (busy) return;
+    // Picker selection (1-9): only when input is empty so digit-typing in the
+    // text box still works for normal input.
+    if (activePicker && /^[1-9]$/.test(inputChar) && input.length === 0) {
+      const choice = activePicker.picker?.options.find((o) => o.key === inputChar);
+      if (choice) {
+        if (key.shift) {
+          // Shift+digit: auto-submit
+          void submitRef.current(choice.payload);
+        } else {
+          setInput(choice.payload);
+        }
+      }
+      return;
+    }
+    if (key.upArrow) {
+      if (inputHistory.length === 0) return;
+      const next = historyCursor == null ? inputHistory.length - 1 : Math.max(0, historyCursor - 1);
+      setHistoryCursor(next);
+      setInput(inputHistory[next] ?? "");
+      return;
+    }
+    if (key.downArrow) {
+      if (historyCursor == null) return;
+      const next = historyCursor + 1;
+      if (next >= inputHistory.length) {
+        setHistoryCursor(null);
+        setInput("");
+      } else {
+        setHistoryCursor(next);
+        setInput(inputHistory[next] ?? "");
+      }
+      return;
     }
   });
 
@@ -181,16 +274,70 @@ function Chat({ cwd }: { cwd: string }): JSX.Element {
     [],
   );
 
+  const clearAll = useCallback(() => {
+    setItems([]);
+    setHistory([]);
+    setScrollOffset(0);
+  }, []);
+
   const submit = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed || busy) return;
-      if (trimmed === "/quit" || trimmed === "/exit") {
-        exit();
+
+      const slash = parseSlash(trimmed);
+      if (slash) {
+        setInput("");
+        pushInputHistory(trimmed);
+        setItems((prev) => [...prev, { kind: "user", id: nextId(), text: trimmed }]);
+        setScrollOffset(0);
+        try {
+          const result = await runSlash(slash, {
+            cwd,
+            onClear: clearAll,
+            onQuit: () => exit(),
+          });
+          if (result.ok) {
+            const item: SlashItem = {
+              kind: "slash",
+              id: nextId(),
+              card: result.card,
+              status: "ok",
+              summary: result.summary,
+              ...(result.details ? { details: result.details } : {}),
+              ...(result.picker ? { picker: result.picker } : {}),
+            };
+            setItems((prev) => [...prev, item]);
+          } else {
+            setItems((prev) => [
+              ...prev,
+              {
+                kind: "slash",
+                id: nextId(),
+                card: result.card,
+                status: "error",
+                summary: result.message,
+              },
+            ]);
+          }
+        } catch (err) {
+          setItems((prev) => [
+            ...prev,
+            {
+              kind: "system",
+              id: nextId(),
+              text: err instanceof Error ? err.message : String(err),
+              tone: "error",
+            },
+          ]);
+        }
         return;
       }
+
       setInput("");
+      pushInputHistory(trimmed);
       setItems((prev) => [...prev, { kind: "user", id: nextId(), text: trimmed }]);
+      setScrollOffset(0);
       setBusy(true);
       const ac = new AbortController();
       abortRef.current = ac;
@@ -224,14 +371,34 @@ function Chat({ cwd }: { cwd: string }): JSX.Element {
         abortRef.current = null;
       }
     },
-    [busy, client, cwd, exit, history, nextId, subscriber],
+    [busy, clearAll, client, cwd, exit, history, nextId, pushInputHistory, subscriber],
   );
+
+  const submitRef = useRef(submit);
+  useEffect(() => {
+    submitRef.current = submit;
+  }, [submit]);
+
+  const totalRows = stdout?.rows ?? 24;
+  // Reserve rows for header (~6), input box + footer (~3), spinner (~1).
+  const viewportRows = Math.max(6, totalRows - 12);
+
+  const visibleItems = useMemo(() => {
+    if (scrollOffset === 0) return items;
+    const cut = Math.min(items.length, scrollOffset);
+    return items.slice(0, items.length - cut);
+  }, [items, scrollOffset]);
 
   return (
     <Box flexDirection="column" paddingX={1} paddingY={1}>
       <Header />
       <Box flexDirection="column">
-        {items.map((item) => (
+        {scrollOffset > 0 ? (
+          <Box>
+            <Text color={theme.muted}>{`  ↑ ${scrollOffset} more · PgDn to follow latest`}</Text>
+          </Box>
+        ) : null}
+        {visibleItems.map((item) => (
           <ChatItemView key={item.id} item={item} />
         ))}
       </Box>
@@ -252,9 +419,7 @@ function Chat({ cwd }: { cwd: string }): JSX.Element {
           placeholder={INPUT_PLACEHOLDER}
         />
       </Box>
-      <Box>
-        <Text color={theme.muted}>⏎ send · esc abort · /quit</Text>
-      </Box>
+      <Footer busy={busy} items={items} />
     </Box>
   );
 }
@@ -295,6 +460,8 @@ function ChatItemView({ item }: { item: ChatItem }): JSX.Element {
       );
     case "tool":
       return <ToolView item={item} />;
+    case "slash":
+      return <SlashView item={item} />;
     case "system":
       return (
         <Box marginTop={1}>
@@ -305,6 +472,111 @@ function ChatItemView({ item }: { item: ChatItem }): JSX.Element {
         </Box>
       );
   }
+}
+
+function SlashView({ item }: { item: SlashItem }): JSX.Element {
+  const glyph =
+    item.status === "ok" ? (
+      <Text color={theme.green}>{symbols.check}</Text>
+    ) : (
+      <Text color={theme.red}>{symbols.cross}</Text>
+    );
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Box>
+        {glyph}
+        <Text color={theme.muted}>{"  cmd · "}</Text>
+        <Text color={theme.cyan}>{item.card}</Text>
+      </Box>
+      <Box>
+        <Text color={theme.muted}>{"  → "}</Text>
+        <Text color={item.status === "error" ? theme.red : theme.muted}>{item.summary}</Text>
+      </Box>
+      {item.details && item.details.length > 0 ? (
+        <Box flexDirection="column" marginLeft={2}>
+          {item.details.map((line, i) => (
+            <Text key={`${item.id}-d-${i}`} color={theme.muted}>
+              {line}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
+      {item.picker ? <PickerView picker={item.picker} /> : null}
+    </Box>
+  );
+}
+
+function PickerView({
+  picker,
+}: {
+  picker: { kind: "files" | "presets"; options: PickerOption[] };
+}): JSX.Element {
+  return (
+    <Box flexDirection="column" marginLeft={2} marginTop={0}>
+      {picker.options.map((opt) => (
+        <Text key={opt.key}>
+          <Text color={theme.pink} bold>{`${opt.key} `}</Text>
+          <Text color={theme.muted}>{opt.label}</Text>
+        </Text>
+      ))}
+      <Text color={theme.muted}>{"  press 1-9 (shift = submit) · esc to dismiss"}</Text>
+    </Box>
+  );
+}
+
+function Footer({ busy, items }: { busy: boolean; items: ChatItem[] }): JSX.Element {
+  if (busy) {
+    const status = summarizeBusy(items);
+    return (
+      <Box>
+        <Text color={theme.muted}>{status}</Text>
+      </Box>
+    );
+  }
+  return (
+    <Box>
+      <Text color={theme.muted}>
+        ⏎ send · / commands · ↑↓ history · PgUp/PgDn scroll · esc cancel · /quit
+      </Text>
+    </Box>
+  );
+}
+
+function summarizeBusy(items: ChatItem[]): string {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (!it || it.kind !== "tool" || it.status !== "running") continue;
+    if (it.name === "compress_video" && it.progress) {
+      const phase = currentRunningPhase(it.progress);
+      if (phase) {
+        return `↻ ${phase.name} ${renderMiniBar(phase.pct)} ${phase.pct}%${phase.speed != null ? ` · ${phase.speed.toFixed(2)}x` : ""} · esc to abort`;
+      }
+      return `↻ encoding · esc to abort`;
+    }
+    return `↻ ${it.name} · esc to abort`;
+  }
+  return "↻ thinking · esc to abort";
+}
+
+function currentRunningPhase(events: ProgressEvent[]): { name: string; pct: number; speed: number | null } | null {
+  // The most recent progress or phase-start event identifies what's running.
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (!e) continue;
+    if (e.type === "progress") {
+      return { name: e.phase, pct: e.currentPct, speed: e.speedX };
+    }
+    if (e.type === "phase-start") {
+      return { name: e.phase, pct: 0, speed: null };
+    }
+  }
+  return null;
+}
+
+function renderMiniBar(pct: number): string {
+  const width = 10;
+  const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
+  return `[${"█".repeat(filled)}${"░".repeat(width - filled)}]`;
 }
 
 function ToolView({ item }: { item: ToolItem }): JSX.Element {

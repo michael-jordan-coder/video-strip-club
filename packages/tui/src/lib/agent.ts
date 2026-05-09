@@ -54,6 +54,39 @@ export function __resetRecentCompressionsForTests(): void {
 }
 
 /**
+ * Clear the in-process recent-compressions map. Used by `/clear` slash
+ * command to reset session state (transcript, history, recent work).
+ */
+export function clearRecentCompressions(): void {
+  recentCompressions.clear();
+}
+
+/**
+ * Look up a recent compression by basename or absolute path. Used by
+ * `open_preview` and the `/open` slash command. Returns the preview path
+ * if available, otherwise the primary output path; null if no match.
+ */
+export function lookupRecentTarget(input: { path?: string | undefined; basename?: string | undefined }): string | null {
+  if (input.path) return input.path;
+  if (input.basename) {
+    const wanted = input.basename;
+    const entries = Array.from(recentCompressions.values()).reverse();
+    const match = entries.find((e) => basename(e.input) === wanted);
+    if (match) return match.htmlPreviewPath ?? match.primaryOutputPath;
+  }
+  return null;
+}
+
+/**
+ * Open a path in the user's default viewer using the platform-appropriate
+ * launcher (xdg-open / open / start). Returns once the child has spawned;
+ * does not wait for the viewer to close.
+ */
+export function openInDefaultViewer(path: string): Promise<void> {
+  return openPath(path);
+}
+
+/**
  * The TUI subscribes to agent activity through this surface. Each tool's
  * `run` function pushes start / progress / end events synchronously so the
  * Ink layer renders live, even while the agent loop is awaiting a long
