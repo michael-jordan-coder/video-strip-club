@@ -121,7 +121,7 @@ You have these tools:
 - analyze_video — probe a specific file. Returns duration, resolution, size, audio presence. Run before recommending a preset.
 - list_presets — get the available web delivery presets and their summaries (sourced from the CLI). Reference them only by id once you've seen this list.
 - estimate_compression — predict output size and encode duration without encoding. Run this before compress_video on inputs longer than 30s, or whenever the user asks "how big will it be?" / "how long will it take?".
-- compress_video — encode the video to ONE optimized file written to the user's current directory. Streams progress to the UI and returns the output path on completion. Accepts an optional \`overrides\` object to tweak the preset (resize, drop audio, single codec, AV1 encoder choice).
+- compress_video — encode the video to ONE optimized file written to the user's current directory. Streams progress to the UI, automatically opens the output in the user's default viewer on success, and returns the output path on completion. Accepts an optional \`overrides\` object to tweak the preset (resize, drop audio, single codec, AV1 encoder choice).
 - open_preview — open a previously-compressed file in the user's default viewer. Use this when the user asks "show me the result" / "open it" after a compression. Identify the artifact by \`path\` (returned by compress_video) or by \`basename\` (the input video's filename — looks up the matching entry from this session).
 
 You will receive a "Recent compressions in this session" message at the start of every turn after the first compression. Use it to answer follow-up requests ("compress that one again at 720p") without re-running list_videos.
@@ -141,7 +141,7 @@ Decision rules for preset selection (apply in order):
 Style:
 - Be concise. This is a TUI — every line costs vertical space.
 - Announce your preset choice in one sentence ("Going with web-hero-cinematic — 12s clip with audio.") then encode.
-- After compress_video returns, tell the user the output path and remind them the file is ephemeral. Single-file mode does not produce an HTML preview, so don't promise one.
+- After compress_video returns, tell the user the output path, mention that it was opened automatically, and remind them the file is ephemeral. Single-file mode does not produce an HTML preview, so don't promise one.
 - If cachedPhases > 0, mention it in one short clause ("3/4 reused from cache").
 - Don't run raw ffmpeg or speculate about encoder internals. The CLI owns encoding strategy.
 - If the user asks something off-topic, politely steer back to video encoding.
@@ -377,7 +377,7 @@ export function createTools({ cwd, subscriberRef }: ToolFactoryArgs) {
   const compressTool = betaZodTool({
     name: "compress_video",
     description:
-      "Encode a video to ONE optimized file using a preset. The file is written into the user's current directory as <basename>.optimized.<ext> and will be deleted when this TUI session ends — tell the user to copy or rename it if they want to keep it. Streams progress events live to the UI. Use `overrides` to adjust the preset (e.g. lower resolution, drop audio, pick a single codec) without switching presets.",
+      "Encode a video to ONE optimized file using a preset. The file is written into the user's current directory as <basename>.optimized.<ext>, automatically opened in the user's default viewer on success, and will be deleted when this TUI session ends — tell the user to copy or rename it if they want to keep it. Streams progress events live to the UI. Use `overrides` to adjust the preset (e.g. lower resolution, drop audio, pick a single codec) without switching presets.",
     inputSchema: z.object({
       path: z.string().describe("Absolute or cwd-relative path to the video file."),
       preset: presetSchema.describe("Preset id to use."),
@@ -396,41 +396,14 @@ export function createTools({ cwd, subscriberRef }: ToolFactoryArgs) {
           (event) => {
             sub?.onToolProgress(id, event);
             if (event.type === "done") {
-              const primary = event.artifacts[0];
-              if (primary) sub?.onOutputCreated(primary.path);
-              const total = event.cachedPhases + event.encodedPhases;
-              const cacheNote =
-                event.cachedPhases > 0 && total > 0
-                  ? ` · ${event.cachedPhases}/${total} reused from cache`
-                  : "";
-              const summary = primary
-                ? `done in ${Math.round(event.durationMs / 100) / 10}s · ${formatArtifact(primary)} → ${primary.path}${cacheNote}`
-                : `done in ${Math.round(event.durationMs / 100) / 10}s${cacheNote}`;
-              sub?.onToolEnd(id, summary, false);
-              rememberCompression({
-                input: resolvePath(input.path),
+              void finishCompression({
+                event,
+                inputPath: input.path,
                 preset: input.preset as PresetId,
-                primaryOutputPath: primary?.path ?? null,
-                htmlPreviewPath: event.htmlPreviewPath,
-                artifacts: event.artifacts,
-                cachedPhases: event.cachedPhases,
-                encodedPhases: event.encodedPhases,
-                durationMs: event.durationMs,
-                completedAt: Date.now(),
+                sub,
+                toolId: id,
+                resolve,
               });
-              resolve(
-                JSON.stringify({
-                  outputPath: primary?.path ?? null,
-                  sizeBytes: primary?.sizeBytes ?? null,
-                  durationMs: event.durationMs,
-                  htmlPreviewPath: event.htmlPreviewPath,
-                  cachedPhases: event.cachedPhases,
-                  encodedPhases: event.encodedPhases,
-                  oversizedCodecs: event.oversizedCodecs,
-                  ephemeralReminder:
-                    "This file will be deleted when the TUI session ends. The user should copy or rename it if they want to keep it.",
-                }),
-              );
             } else if (event.type === "error") {
               const message = `${event.phase}: ${event.message}`;
               sub?.onToolEnd(id, message, true);
@@ -483,6 +456,80 @@ export function createTools({ cwd, subscriberRef }: ToolFactoryArgs) {
   });
 
   return [listTool, analyzeTool, presetsTool, estimateTool, compressTool, openPreviewTool];
+}
+
+async function finishCompression({
+  event,
+  inputPath,
+  preset,
+  sub,
+  toolId,
+  resolve,
+}: {
+  event: Extract<ProgressEvent, { type: "done" }>;
+  inputPath: string;
+  preset: PresetId;
+  sub: AgentSubscriber | null;
+  toolId: string;
+  resolve: (value: string) => void;
+}): Promise<void> {
+  const primary = event.artifacts[0];
+  if (primary) sub?.onOutputCreated(primary.path);
+
+  let autoOpen: { opened: boolean; error: string | null } = { opened: false, error: null };
+  if (primary) {
+    try {
+      await openPath(primary.path);
+      autoOpen = { opened: true, error: null };
+    } catch (err) {
+      autoOpen = {
+        opened: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  const total = event.cachedPhases + event.encodedPhases;
+  const cacheNote =
+    event.cachedPhases > 0 && total > 0
+      ? ` · ${event.cachedPhases}/${total} reused from cache`
+      : "";
+  const openNote = autoOpen.opened
+    ? " · opened"
+    : autoOpen.error
+      ? ` · auto-open failed: ${autoOpen.error}`
+      : "";
+  const summary = primary
+    ? `done in ${Math.round(event.durationMs / 100) / 10}s · ${formatArtifact(primary)} → ${primary.path}${cacheNote}${openNote}`
+    : `done in ${Math.round(event.durationMs / 100) / 10}s${cacheNote}`;
+
+  sub?.onToolEnd(toolId, summary, false);
+  rememberCompression({
+    input: resolvePath(inputPath),
+    preset,
+    primaryOutputPath: primary?.path ?? null,
+    htmlPreviewPath: event.htmlPreviewPath,
+    artifacts: event.artifacts,
+    cachedPhases: event.cachedPhases,
+    encodedPhases: event.encodedPhases,
+    durationMs: event.durationMs,
+    completedAt: Date.now(),
+  });
+  resolve(
+    JSON.stringify({
+      outputPath: primary?.path ?? null,
+      sizeBytes: primary?.sizeBytes ?? null,
+      durationMs: event.durationMs,
+      htmlPreviewPath: event.htmlPreviewPath,
+      cachedPhases: event.cachedPhases,
+      encodedPhases: event.encodedPhases,
+      oversizedCodecs: event.oversizedCodecs,
+      autoOpened: autoOpen.opened,
+      autoOpenError: autoOpen.error,
+      ephemeralReminder:
+        "This file will be deleted when the TUI session ends. The user should copy or rename it if they want to keep it.",
+    }),
+  );
 }
 
 function resolveOpenTarget(input: { path?: string | undefined; basename?: string | undefined }): string | null {

@@ -7,6 +7,49 @@ Open-source video optimization for web delivery, packaged two ways:
 
 The CLI is the engine. The agent is the orchestrator. They share the same set of presets in `src/presets/web.ts`.
 
+## Product direction
+
+The terminal experience is the v1 product surface. Finish and harden it before
+building another UI. The TUI is the fastest place to validate the core workflow
+because it already uses local files, the real encoder, live progress events, and
+the same output lifecycle that a local web app would need.
+
+The next UI surface should be a local web app, not a hosted service. A local web
+app can wrap the same CLI/event stream behind a browser interface without taking
+on uploads, cloud storage, job queues, worker capacity, or billing. Build it
+after the TUI flow is stable enough to port rather than while the interaction
+model is still changing.
+
+### TUI v1 checklist
+
+- Main flow works end-to-end: open `/files` or `/list`, pick a video, analyze,
+  choose or confirm a preset, compress, auto-open, and review the result.
+- Result review is reliable: open again, keep, copy path, compress again, and
+  delete behave predictably.
+- Preset choice is trustworthy: the UI or agent explains the choice using
+  duration, audio, intended use, and expected output.
+- Failure states are actionable: missing dependencies, bad input paths,
+  unsupported media, encode failures, auto-open failures, and clipboard failures
+  all tell the user what happened and what to do next.
+- A new user can complete a compression from `npm run strip-club` without knowing
+  the lower-level CLI.
+- README and TUI docs match the actual workflow.
+
+### Local web app later
+
+When the TUI reaches v1, add a `packages/web` local app:
+
+```text
+React UI
+  -> local Node server
+  -> existing vsc CLI / NDJSON event stream
+  -> ffmpeg encoders
+```
+
+Start with a deterministic browser UI: file list, analyze, preset selection,
+compress, live progress, result review, and open/keep/delete actions. Add an
+agent or chat layer only after that workflow is working as a normal tool.
+
 ## Quickstart
 
 ```bash
@@ -20,6 +63,14 @@ npm install
 ```
 
 The TUI is an agent loop: you type natural language ("compress hero.mp4 for the landing page"), Claude calls `vsc` tools (`list_videos`, `analyze_video`, `list_presets`, `compress_video`) and surfaces each call + its result inline, with per-phase progress bars during the encode. Requires `ANTHROPIC_API_KEY` — get one at console.anthropic.com.
+Successful TUI compressions automatically open the output video in the system
+default viewer.
+
+The Ink TUI includes Charm/Bubbles-style UI elements for transcript scrolling,
+filterable slash/file/preset pickers, tables, generated key help, progress bars,
+result review actions, elapsed timers, and a multiline composer. See
+[`packages/tui/UI_ELEMENTS.md`](packages/tui/UI_ELEMENTS.md) for when each
+element appears and why.
 
 Every successful run also writes a self-contained `<basename>.html` preview page next to the artifacts — `open` it to see the encoded video, file sizes, and a copy-paste `<video>` snippet.
 

@@ -20,6 +20,7 @@ export type SlashKind =
   | "help"
   | "clear"
   | "list"
+  | "files"
   | "presets"
   | "estimate"
   | "open"
@@ -37,6 +38,25 @@ export interface PickerOption {
   payload: string;
 }
 
+export interface SlashCommandInfo {
+  command: string;
+  usage: string;
+  description: string;
+  aliases?: string[];
+  insertText: string;
+}
+
+export interface SlashTable {
+  columns: Array<{
+    key: string;
+    label: string;
+    width?: number;
+    align?: "left" | "right";
+  }>;
+  rows: Array<Record<string, string | number>>;
+  maxRows?: number;
+}
+
 export interface SlashOk {
   ok: true;
   /** Card name shown in the tool-card header. */
@@ -47,6 +67,8 @@ export interface SlashOk {
   picker?: { kind: "files" | "presets"; options: PickerOption[] };
   /** Optional secondary lines to render inside the card. */
   details?: string[];
+  /** Optional table for structured command output. */
+  table?: SlashTable;
 }
 
 export interface SlashErr {
@@ -67,15 +89,73 @@ export interface SlashContext {
   emitProgress?: (event: ProgressEvent) => void;
 }
 
-const HELP_LINES = [
-  "/help                                    show this list",
-  "/list [dir]                              scan a directory for videos (numbered picker)",
-  "/presets                                 list web delivery presets (numbered picker)",
-  "/estimate <file> --preset <id> [--override k=v ...]   predict size + encode time",
-  "/open <basename|path>                    open a recent compression (or any path) in the default viewer",
-  "/clear                                   reset transcript and recent-work memory",
-  "/quit                                    exit",
+export const SLASH_COMMANDS: SlashCommandInfo[] = [
+  {
+    command: "/help",
+    usage: "/help",
+    description: "show slash command help",
+    aliases: ["/?"],
+    insertText: "/help",
+  },
+  {
+    command: "/list",
+    usage: "/list [dir]",
+    description: "scan a directory for videos",
+    aliases: ["/ls"],
+    insertText: "/list",
+  },
+  {
+    command: "/files",
+    usage: "/files [dir]",
+    description: "open the video file picker",
+    aliases: ["/pick"],
+    insertText: "/files",
+  },
+  {
+    command: "/presets",
+    usage: "/presets",
+    description: "list web delivery presets",
+    insertText: "/presets",
+  },
+  {
+    command: "/estimate",
+    usage: "/estimate <file> --preset <id> [--override k=v ...]",
+    description: "predict size and encode time",
+    aliases: ["/est"],
+    insertText: "/estimate ",
+  },
+  {
+    command: "/open",
+    usage: "/open <basename|path>",
+    description: "open a recent compression or explicit path",
+    insertText: "/open ",
+  },
+  {
+    command: "/clear",
+    usage: "/clear",
+    description: "reset transcript and recent-work memory",
+    insertText: "/clear",
+  },
+  {
+    command: "/quit",
+    usage: "/quit",
+    description: "exit",
+    aliases: ["/exit"],
+    insertText: "/quit",
+  },
 ];
+
+const HELP_LINES = SLASH_COMMANDS.map((command) =>
+  `${command.usage.padEnd(52)} ${command.description}`,
+);
+
+export function slashCommandOptions(): PickerOption[] {
+  return SLASH_COMMANDS.map((command, i) => ({
+    key: String(i + 1),
+    label: `${command.usage} · ${command.description}${command.aliases ? ` · ${command.aliases.join(", ")}` : ""}`,
+    payload: command.insertText,
+  }));
+}
 
 export function parseSlash(raw: string): SlashCommand | null {
   const trimmed = raw.trim();
@@ -97,6 +177,9 @@ function matchKind(head: string): SlashKind | null {
     case "list":
     case "ls":
       return "list";
+    case "files":
+    case "pick":
+      return "files";
     case "presets":
       return "presets";
     case "estimate":
@@ -133,6 +216,8 @@ export async function runSlash(
       return { ok: true, card: "/quit", summary: "bye" };
     case "list":
       return runList(cmd.args, ctx);
+    case "files":
+      return runList(cmd.args, ctx, "/files");
     case "presets":
       return runPresets();
     case "estimate":
@@ -142,27 +227,38 @@ export async function runSlash(
   }
 }
 
-async function runList(args: string[], ctx: SlashContext): Promise<SlashResult> {
+async function runList(
+  args: string[],
+  ctx: SlashContext,
+  cardPrefix = "/list",
+): Promise<SlashResult> {
   const dir = args[0] ? resolvePath(args[0]) : ctx.cwd;
   try {
     const videos = await listVideos(dir);
     if (videos.length === 0) {
-      return { ok: true, card: `/list ${dir}`, summary: "no videos found" };
+      return { ok: true, card: `${cardPrefix} ${dir}`, summary: "no videos found" };
     }
-    const options: PickerOption[] = videos.slice(0, 9).map((v, i) => ({
+    const options: PickerOption[] = videos.map((v, i) => ({
       key: String(i + 1),
       label: `${v.name} · ${formatBytes(v.sizeBytes)}`,
       payload: v.path,
     }));
-    const overflow = videos.length > 9 ? ` (+${videos.length - 9} more)` : "";
     return {
       ok: true,
-      card: `/list ${dir}`,
-      summary: `${videos.length} video${videos.length === 1 ? "" : "s"}${overflow} · press 1-9 to pick`,
+      card: `${cardPrefix} ${dir}`,
+      summary: `${videos.length} video${videos.length === 1 ? "" : "s"} · type to filter, enter to pick`,
+      table: {
+        columns: [
+          { key: "file", label: "file", width: 36 },
+          { key: "size", label: "size", width: 10, align: "right" },
+        ],
+        rows: videos.map((v) => ({ file: v.name, size: formatBytes(v.sizeBytes) })),
+        maxRows: 8,
+      },
       picker: { kind: "files", options },
     };
   } catch (err) {
-    return { ok: false, card: `/list ${dir}`, message: err instanceof Error ? err.message : String(err) };
+    return { ok: false, card: `${cardPrefix} ${dir}`, message: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -178,7 +274,7 @@ interface PresetSummary {
 async function runPresets(): Promise<SlashResult> {
   try {
     const data = await runVscJson<{ presets: PresetSummary[] }>(["presets", "--json"]);
-    const options: PickerOption[] = data.presets.slice(0, 9).map((p, i) => ({
+    const options: PickerOption[] = data.presets.map((p, i) => ({
       key: String(i + 1),
       label: `${p.id} · ${p.summary}`,
       payload: p.id,
@@ -186,7 +282,19 @@ async function runPresets(): Promise<SlashResult> {
     return {
       ok: true,
       card: "/presets",
-      summary: `${data.presets.length} presets · press 1-9 to pick`,
+      summary: `${data.presets.length} presets · type to filter, enter to pick`,
+      table: {
+        columns: [
+          { key: "preset", label: "preset", width: 22 },
+          { key: "outputs", label: "outputs", width: 18 },
+          { key: "edge", label: "edge", width: 8, align: "right" },
+        ],
+        rows: data.presets.map((p) => ({
+          preset: p.id,
+          outputs: [...p.codecs, ...(p.hasGif ? ["gif"] : [])].join(", "),
+          edge: p.maxEdge == null ? "source" : `${p.maxEdge}px`,
+        })),
+      },
       picker: { kind: "presets", options },
     };
   } catch (err) {
@@ -221,15 +329,24 @@ async function runEstimate(args: string[]): Promise<SlashResult> {
   for (const o of parsed.overrides) cliArgs.push("--override", o);
   try {
     const data = await runVscJson<EstimateResult>(cliArgs);
-    const details = data.phases.map(
-      (p) =>
-        `  ${p.name.padEnd(14)} ~${formatBytes(p.estimatedSizeBytes).padStart(9)}  ~${p.estimatedSeconds.toFixed(1)}s  (${p.encoder})`,
-    );
     return {
       ok: true,
       card: `/estimate ${parsed.preset}`,
       summary: `~${formatBytes(data.totalBytes)} total · ~${data.totalSeconds.toFixed(0)}s encode · ${data.phases.length} phases`,
-      details,
+      table: {
+        columns: [
+          { key: "phase", label: "phase", width: 16 },
+          { key: "size", label: "size", width: 10, align: "right" },
+          { key: "time", label: "time", width: 8, align: "right" },
+          { key: "encoder", label: "encoder", width: 16 },
+        ],
+        rows: data.phases.map((p) => ({
+          phase: p.name,
+          size: `~${formatBytes(p.estimatedSizeBytes)}`,
+          time: `~${p.estimatedSeconds.toFixed(1)}s`,
+          encoder: p.encoder,
+        })),
+      },
     };
   } catch (err) {
     return { ok: false, card: `/estimate ${parsed.preset}`, message: err instanceof Error ? err.message : String(err) };
