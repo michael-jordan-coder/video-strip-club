@@ -5,6 +5,7 @@ import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
 import { listVideos, formatBytes, formatDuration } from "./files.ts";
 import { probe, runVscJson, startEncode } from "./vsc.ts";
+import type { EncodeHandle } from "./vsc.ts";
 import type { CompressedArtifact, PresetId, ProgressEvent } from "../types.ts";
 
 interface RecentEntry {
@@ -151,6 +152,7 @@ Always be willing to ask one short clarifying question when the input is genuine
 interface ToolFactoryArgs {
   cwd: string;
   subscriberRef: { current: AgentSubscriber | null };
+  signal?: AbortSignal | undefined;
 }
 
 function makeId(): string {
@@ -176,7 +178,7 @@ function formatArtifact(a: CompressedArtifact): string {
   return `gif ${formatBytes(a.sizeBytes)}`;
 }
 
-export function createTools({ cwd, subscriberRef }: ToolFactoryArgs) {
+export function createTools({ cwd, subscriberRef, signal }: ToolFactoryArgs) {
   const listTool = betaZodTool({
     name: "list_videos",
     description:
@@ -388,14 +390,37 @@ export function createTools({ cwd, subscriberRef }: ToolFactoryArgs) {
       const sub = subscriberRef.current;
       sub?.onToolStart(id, "compress_video", input);
       return new Promise<string>((resolve, reject) => {
+        if (signal?.aborted) {
+          const message = "aborted";
+          sub?.onToolEnd(id, message, true);
+          reject(new Error(message));
+          return;
+        }
         const overrides = input.overrides ?? {};
-        startEncode(
+        let handle: EncodeHandle | null = null;
+        let settled = false;
+        const settleReject = (message: string) => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener("abort", abortEncode);
+          sub?.onToolEnd(id, message, true);
+          reject(new Error(message));
+        };
+        const abortEncode = () => {
+          handle?.abort();
+          settleReject("aborted");
+        };
+        signal?.addEventListener("abort", abortEncode, { once: true });
+        handle = startEncode(
           input.path,
           input.preset as PresetId,
           { outDir: cwd, single: true, overrides },
           (event) => {
+            if (settled) return;
             sub?.onToolProgress(id, event);
             if (event.type === "done") {
+              settled = true;
+              signal?.removeEventListener("abort", abortEncode);
               void finishCompression({
                 event,
                 inputPath: input.path,
@@ -406,13 +431,11 @@ export function createTools({ cwd, subscriberRef }: ToolFactoryArgs) {
               });
             } else if (event.type === "error") {
               const message = `${event.phase}: ${event.message}`;
-              sub?.onToolEnd(id, message, true);
-              reject(new Error(message));
+              settleReject(message);
             }
           },
           (message) => {
-            sub?.onToolEnd(id, message, true);
-            reject(new Error(message));
+            settleReject(message);
           },
         );
       });
@@ -585,7 +608,7 @@ export async function runTurn({
   signal,
 }: RunTurnArgs): Promise<AgentTurnResult> {
   const subscriberRef: { current: AgentSubscriber | null } = { current: subscriber };
-  const tools = createTools({ cwd, subscriberRef });
+  const tools = createTools({ cwd, subscriberRef, signal });
 
   // Inject a separate "recent work" user-role turn so the model can refer to
   // prior compressions ("compress that one again at 720p") without re-running

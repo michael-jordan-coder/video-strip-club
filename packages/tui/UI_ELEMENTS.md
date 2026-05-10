@@ -14,6 +14,7 @@ of inventing product behavior in parallel.
 | List | `/presets` returns available presets. | Presets are a choice set, not prose. The filterable list lets the user narrow by id or summary and press `enter` to select. |
 | File picker | `/list [dir]` or `/files [dir]` finds videos. | Video paths are tedious to type. The picker filters detected video files and inserts the selected path into the normal agent flow. |
 | Table | `/list`, `/presets`, and `/estimate` return structured results. | Sizes, phase names, encoders, and preset attributes scan better in columns than in padded prose. |
+| Doctor output | `/doctor` runs from the slash palette or composer. | Dependency issues are a first-run blocker. Showing the same required/optional tool check inside the TUI keeps users from dropping to the shell to diagnose missing ffmpeg or ffprobe. |
 | Help | The footer is always visible; press `?` to expand it. | The active keys change by state, so the footer is generated from key bindings instead of hard-coded text. |
 | Key bindings | Normal chat, picker mode, textarea mode, and busy mode each expose their own footer keys. | Avoids stale instructions. For example, `↑/↓` means history in chat mode but movement in picker mode. |
 | Slash palette | Type `/` in the composer. | Shows the available slash commands before submit, like Codex. The list filters as you type; `enter` or `1`-`9` inserts the highlighted command, then the next `enter` runs it. |
@@ -35,6 +36,8 @@ of inventing product behavior in parallel.
   `shift` plus the number submits it immediately.
 - `esc` cancels the most local thing first: running agent turn, active picker,
   scrolled viewport, or textarea mode.
+- During a running encode, `esc` aborts the agent turn and terminates the local
+  `vsc compress` child process.
 - `PgUp` and `PgDn` always operate on the transcript viewport.
 - Compression outputs are still ephemeral even when auto-opened; rename or copy
   the output if it should survive the TUI session.

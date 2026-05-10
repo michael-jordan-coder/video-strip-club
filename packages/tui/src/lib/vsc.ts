@@ -150,6 +150,29 @@ export async function runVscJson<T>(args: string[]): Promise<T> {
   return JSON.parse(out) as T;
 }
 
+export interface VscCommandResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+export function runVsc(args: string[]): Promise<VscCommandResult> {
+  const bin = findVscBin();
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (c: string) => (stdout += c));
+    child.stderr.on("data", (c: string) => (stderr += c));
+    child.on("close", (code) => {
+      resolveRun({ code: code ?? 1, stdout, stderr });
+    });
+    child.on("error", rejectRun);
+  });
+}
+
 function runCapture(bin: string, args: string[]): Promise<string> {
   return new Promise((resolveCapture, rejectCapture) => {
     const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });

@@ -1,6 +1,6 @@
 import { resolve as resolvePath } from "node:path";
 import { listVideos, formatBytes } from "./files.ts";
-import { runVscJson } from "./vsc.ts";
+import { runVsc, runVscJson } from "./vsc.ts";
 import {
   clearRecentCompressions,
   lookupRecentTarget,
@@ -21,6 +21,7 @@ export type SlashKind =
   | "clear"
   | "list"
   | "files"
+  | "doctor"
   | "presets"
   | "estimate"
   | "open"
@@ -75,6 +76,7 @@ export interface SlashErr {
   ok: false;
   card: string;
   message: string;
+  details?: string[];
 }
 
 export type SlashResult = SlashOk | SlashErr;
@@ -116,6 +118,12 @@ export const SLASH_COMMANDS: SlashCommandInfo[] = [
     usage: "/presets",
     description: "list web delivery presets",
     insertText: "/presets",
+  },
+  {
+    command: "/doctor",
+    usage: "/doctor",
+    description: "check local encoder dependencies",
+    insertText: "/doctor",
   },
   {
     command: "/estimate",
@@ -182,6 +190,8 @@ function matchKind(head: string): SlashKind | null {
       return "files";
     case "presets":
       return "presets";
+    case "doctor":
+      return "doctor";
     case "estimate":
     case "est":
       return "estimate";
@@ -220,6 +230,8 @@ export async function runSlash(
       return runList(cmd.args, ctx, "/files");
     case "presets":
       return runPresets();
+    case "doctor":
+      return runDoctor();
     case "estimate":
       return runEstimate(cmd.args);
     case "open":
@@ -302,6 +314,26 @@ async function runPresets(): Promise<SlashResult> {
   }
 }
 
+async function runDoctor(): Promise<SlashResult> {
+  try {
+    const result = await runVsc(["doctor"]);
+    const output = stripAnsi(`${result.stdout}\n${result.stderr}`)
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 0);
+    const missingLine = output.find((line) => line.includes("required dependency missing"));
+    const summary = result.code === 0
+      ? "all required dependencies present"
+      : missingLine ?? `dependency check failed with exit code ${result.code}`;
+    if (result.code === 0) {
+      return { ok: true, card: "/doctor", summary, details: output };
+    }
+    return { ok: false, card: "/doctor", message: summary, details: output };
+  } catch (err) {
+    return { ok: false, card: "/doctor", message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 interface EstimateResult {
   durationSec: number;
   totalBytes: number;
@@ -312,6 +344,10 @@ interface EstimateResult {
     estimatedSizeBytes: number;
     estimatedSeconds: number;
   }>;
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 interface ParsedEstimateArgs {

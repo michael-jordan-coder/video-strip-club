@@ -31,6 +31,8 @@ model is still changing.
 - Failure states are actionable: missing dependencies, bad input paths,
   unsupported media, encode failures, auto-open failures, and clipboard failures
   all tell the user what happened and what to do next.
+- Running encodes can be stopped with `esc`; aborting should terminate the local
+  `vsc compress` child process, not just the agent turn.
 - A new user can complete a compression from `npm run strip-club` without knowing
   the lower-level CLI.
 - README and TUI docs match the actual workflow.
@@ -65,6 +67,7 @@ npm install
 The TUI is an agent loop: you type natural language ("compress hero.mp4 for the landing page"), Claude calls `vsc` tools (`list_videos`, `analyze_video`, `list_presets`, `compress_video`) and surfaces each call + its result inline, with per-phase progress bars during the encode. Requires `ANTHROPIC_API_KEY` — get one at console.anthropic.com.
 Successful TUI compressions automatically open the output video in the system
 default viewer.
+Use `/doctor` inside the TUI to check local encoder dependencies before a run.
 
 The Ink TUI includes Charm/Bubbles-style UI elements for transcript scrolling,
 filterable slash/file/preset pickers, tables, generated key help, progress bars,

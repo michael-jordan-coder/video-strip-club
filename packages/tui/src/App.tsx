@@ -543,6 +543,7 @@ function Chat({ cwd }: { cwd: string }): JSX.Element {
                 card: result.card,
                 status: "error",
                 summary: result.message,
+                ...(result.details ? { details: result.details } : {}),
               },
             ]);
           }
