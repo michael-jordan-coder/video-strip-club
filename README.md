@@ -1,5 +1,4 @@
-
-<img width="887" height="1774" alt="strip-club" src="https://github.com/user-attachments/assets/9c241991-2b4b-4c5a-964a-bdcf3dd90563" />
+<img width="1254" height="1254" alt="ChatGPT Image May 13, 2026, 12_50_56 AM" src="https://github.com/user-attachments/assets/77f32886-6ecf-4b7f-ac20-34c561a58e7a" />
 
 
 # video-strip-club
