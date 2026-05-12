@@ -1,3 +1,7 @@
+
+<img width="887" height="1774" alt="strip-club" src="https://github.com/user-attachments/assets/9c241991-2b4b-4c5a-964a-bdcf3dd90563" />
+
+
 # video-strip-club
 
 Open-source video optimization for web delivery, packaged two ways:
